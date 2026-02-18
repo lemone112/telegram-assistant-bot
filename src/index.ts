@@ -60,6 +60,13 @@ function getAllowedUserSet(env: Env): Set<number> | null {
   return new Set(ids);
 }
 
+function assertAdmin(env: Env, telegramUserId: number) {
+  const allowed = getAllowedUserSet(env);
+  if (!allowed || !allowed.has(telegramUserId)) {
+    throw new Error("Admin command is restricted (set BOT_ALLOWED_TELEGRAM_USER_IDS)");
+  }
+}
+
 async function tgCall<T>(env: Env, method: string, payload: Record<string, unknown>): Promise<T> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
   const res = await fetch(url, {
@@ -122,7 +129,6 @@ async function upsertTelegramUser(env: Env, from: { id: number; username?: strin
   const client = supa(env);
   const sch = schema(env);
 
-  // Upsert by unique telegram_user_id
   const { data, error } = await client
     .schema(sch)
     .from("telegram_users")
@@ -146,6 +152,21 @@ async function upsertTelegramUser(env: Env, from: { id: number; username?: strin
   return data as { id: string; telegram_user_id: number };
 }
 
+async function getSettingsValue(env: Env, key: string): Promise<any> {
+  const client = supa(env);
+  const sch = schema(env);
+  const { data, error } = await client.schema(sch).from("settings").select("value").eq("key", key).maybeSingle();
+  if (error) throw new Error(`Supabase get settings(${key}) failed: ${error.message}`);
+  return (data as any)?.value ?? null;
+}
+
+async function upsertSettingsValue(env: Env, key: string, value: any) {
+  const client = supa(env);
+  const sch = schema(env);
+  const { error } = await client.schema(sch).from("settings").upsert({ key, value } as any);
+  if (error) throw new Error(`Supabase upsert settings(${key}) failed: ${error.message}`);
+}
+
 async function audit(
   env: Env,
   draftDbId: string | null,
@@ -167,8 +188,41 @@ async function audit(
   } as any);
 
   if (error) {
-    // don't fail the request because of audit failure
     console.log("audit insert failed", error.message);
+  }
+}
+
+async function createApplyAttempt(env: Env, draftDbId: string, idempotencyKey: string) {
+  const client = supa(env);
+  const sch = schema(env);
+
+  const { data, error } = await client
+    .schema(sch)
+    .from("draft_apply_attempts")
+    .insert({ draft_id: draftDbId, idempotency_key: idempotencyKey, started_at: nowIso() } as any)
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    // If unique constraint triggers, this is fine; idempotency gate should already stop re-apply.
+    throw new Error(`Supabase create apply attempt failed: ${error.message}`);
+  }
+
+  return (data as any)?.id as string;
+}
+
+async function finishApplyAttempt(env: Env, attemptId: string, result: any, errorSummary: string | null) {
+  const client = supa(env);
+  const sch = schema(env);
+
+  const { error } = await client
+    .schema(sch)
+    .from("draft_apply_attempts")
+    .update({ finished_at: nowIso(), result: result ?? {}, error_summary: errorSummary } as any)
+    .eq("id", attemptId);
+
+  if (error) {
+    console.log("finishApplyAttempt failed", error.message);
   }
 }
 
@@ -177,7 +231,6 @@ async function resolveStageName(env: Env, stageInput: string): Promise<{ stage_k
   const sch = schema(env);
   const normalized = stageInput.trim().toLowerCase();
 
-  // 1) alias exact match
   {
     const { data, error } = await client
       .schema(sch)
@@ -200,7 +253,6 @@ async function resolveStageName(env: Env, stageInput: string): Promise<{ stage_k
     }
   }
 
-  // 2) stage_name match (case-insensitive)
   {
     const { data, error } = await client
       .schema(sch)
@@ -217,18 +269,7 @@ async function resolveStageName(env: Env, stageInput: string): Promise<{ stage_k
 }
 
 async function applyDealStage(env: Env, actorTelegramId: number, draftDbId: string, dealId: string, stageInput: string) {
-  const client = supa(env);
-  const sch = schema(env);
-
-  const { data: settings, error: se } = await client
-    .schema(sch)
-    .from("settings")
-    .select("value")
-    .eq("key", "composio")
-    .maybeSingle();
-  if (se) throw new Error(`Supabase get settings(composio) failed: ${se.message}`);
-
-  const composioSettings = (settings as any)?.value ?? null;
+  const composioSettings = await getSettingsValue(env, "composio");
   const attioConn = (composioSettings?.attio_connection_id as string | null) ?? null;
   if (!attioConn) throw new Error("Composio Attio connection id is not configured in bot.settings (key=composio)");
 
@@ -262,6 +303,58 @@ async function applyDealStage(env: Env, actorTelegramId: number, draftDbId: stri
   return resolved;
 }
 
+async function handleAdminCommand(env: Env, chatId: number, fromId: number, args: string) {
+  assertAdmin(env, fromId);
+
+  const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
+
+  if (!sub || sub === "help") {
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text:
+        "Admin commands:\n" +
+        "/admin status\n" +
+        "/admin composio attio <connected_account_id>\n",
+    });
+    return;
+  }
+
+  if (sub === "status") {
+    const composio = await getSettingsValue(env, "composio");
+    const attioConn = composio?.attio_connection_id ?? null;
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text:
+        "Status:\n" +
+        `- schema: ${schema(env)}\n` +
+        `- composio.attio_connection_id: ${attioConn ? attioConn : "<not set>"}\n`,
+    });
+    return;
+  }
+
+  if (sub === "composio") {
+    const [tool, value] = rest;
+    if (tool !== "attio" || !value) {
+      await tgCall(env, "sendMessage", {
+        chat_id: chatId,
+        text: "Usage: /admin composio attio <connected_account_id>",
+      });
+      return;
+    }
+
+    const next = { attio_connection_id: value };
+    await upsertSettingsValue(env, "composio", next);
+
+    await tgCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: `Saved: composio.attio_connection_id = ${value}`,
+    });
+    return;
+  }
+
+  await tgCall(env, "sendMessage", { chat_id: chatId, text: "Unknown admin command" });
+}
+
 async function handleCommand(env: Env, chatId: number, from: NonNullable<TelegramUpdate["message"]>["from"], cmd: string, args: string, rawText: string) {
   switch (cmd) {
     case "start":
@@ -271,9 +364,15 @@ async function handleCommand(env: Env, chatId: number, from: NonNullable<Telegra
         text:
           "Команды:\n" +
           "/deal stage <deal_id> <stage>\n" +
-          "/deal won <deal_id>\n\n" +
+          "/deal won <deal_id>\n" +
+          "/admin help\n\n" +
           "Все изменения выполняются только через Draft → Применить.",
       });
+      return;
+    }
+
+    case "admin": {
+      await handleAdminCommand(env, chatId, from.id, args);
       return;
     }
 
@@ -392,10 +491,8 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   const client = supa(env);
   const sch = schema(env);
 
-  // Upsert user and use FK for author check
   const user = await upsertTelegramUser(env, cb.from);
 
-  // fetch draft
   const { data: draft, error } = await client
     .schema(sch)
     .from("drafts")
@@ -409,7 +506,6 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
     return;
   }
 
-  // only author can apply/cancel
   if (String((draft as any).telegram_user_id) !== String(user.id)) {
     await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Only draft author can do this" });
     return;
@@ -435,8 +531,9 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
     return;
   }
 
-  // idempotency gate (baseline: bot.idempotency_keys)
   const idempotencyKey = `tg:callback:${cb.id}`;
+
+  // Idempotency gate
   {
     const { error: idemErr } = await client
       .schema(sch)
@@ -447,6 +544,9 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
       return;
     }
   }
+
+  // Observability
+  const attemptId = await createApplyAttempt(env, draftDbId, idempotencyKey);
 
   await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Applying..." });
 
@@ -463,12 +563,16 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
       await client.schema(sch).from("drafts").update({ status: "APPLIED" } as any).eq("id", draftDbId);
       await audit(env, draftDbId, "draft.apply", "info", { actor_telegram_user_id: cb.from.id, type: first.type });
 
+      await finishApplyAttempt(env, attemptId, { ok: true, stage: resolved }, null);
+
       await tgCall(env, "sendMessage", {
         chat_id: chatId,
         text: `Готово. Сделка ${dealId} переведена в стадию: ${resolved.stage_name}`,
       });
       return;
     }
+
+    await finishApplyAttempt(env, attemptId, { ok: false, reason: "type not implemented", type: first?.type ?? null }, null);
 
     await tgCall(env, "sendMessage", {
       chat_id: chatId,
@@ -477,6 +581,7 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await audit(env, draftDbId, "draft.apply", "error", { actor_telegram_user_id: cb.from.id }, msg);
+    await finishApplyAttempt(env, attemptId, { ok: false }, msg);
     await tgCall(env, "sendMessage", { chat_id: chatId, text: `Ошибка Apply: ${msg}` });
   }
 }
