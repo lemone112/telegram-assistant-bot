@@ -15,7 +15,7 @@ Add these in: GitHub → Settings → Secrets and variables → Actions.
 ### Variables (recommended)
 - `CF_WORKER_NAME` (default: `telegram-assistant-bot`)
 - `SUPABASE_SCHEMA` (default: `bot`)
-- `SUPABASE_PROJECT_REF` (example: `igobxicu yfz kpoekamwt`)
+- `SUPABASE_PROJECT_REF` (example: `igobxicuyfzkpoekamwt`)
 - `PAUSE_REMINDER_DAYS` (default: `7`)
 - `BOT_ALLOWED_TELEGRAM_USER_IDS` (comma-separated telegram user IDs)
 - `LINEAR_TEAM_ID` (example: `9bb39310-30fb-49d4-936f-041f7c83b494`)
