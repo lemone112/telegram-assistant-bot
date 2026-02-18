@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { composioExecute } from "./composio";
+import { KICKOFF_TEMPLATE_TASKS } from "./linear_kickoff_template";
 
 type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -11,6 +12,7 @@ type Env = {
   SUPABASE_SCHEMA?: string;
   PAUSE_REMINDER_DAYS?: string;
   BOT_ALLOWED_TELEGRAM_USER_IDS?: string;
+  LINEAR_TEAM_ID?: string;
 };
 
 type TelegramUpdate = {
@@ -315,6 +317,100 @@ async function applyDealStage(env: Env, actorTelegramId: number, draftDbId: stri
   return resolved;
 }
 
+async function ensureLinearKickoff(
+  env: Env,
+  actorTelegramId: number,
+  draftDbId: string,
+  attioDealId: string,
+  linearTeamId: string
+) {
+  const client = supa(env);
+  const sch = schema(env);
+
+  const composioSettings = await getSettingsValue(env, "composio");
+  const linearConn = (composioSettings?.linear_connection_id as string | null) ?? null;
+  if (!linearConn) {
+    throw new Error(
+      "Composio Linear connection id is not configured. Set it via /admin composio linear <connected_account_id>"
+    );
+  }
+
+  const created: any[] = [];
+
+  for (const t of KICKOFF_TEMPLATE_TASKS) {
+    const projectKey = `deal:${attioDealId}`;
+
+    const { data: existingTask, error: terr } = await client
+      .schema(sch)
+      .from("project_template_tasks")
+      .select("linear_project_id,template_task_key,linear_issue_id,linear_issue_identifier,title")
+      .eq("linear_project_id", projectKey)
+      .eq("template_task_key", t.template_task_key)
+      .maybeSingle();
+    if (terr) throw new Error(`Supabase project_template_tasks read failed: ${terr.message}`);
+
+    if ((existingTask as any)?.linear_issue_id) {
+      continue;
+    }
+
+    const issue = await composioExecute(env, {
+      tool_slug: "LINEAR_CREATE_LINEAR_ISSUE",
+      connected_account_id: linearConn,
+      arguments: {
+        team_id: linearTeamId,
+        title: t.title,
+        description: t.description,
+      },
+    });
+
+    const issueId = (issue as any)?.id ?? (issue as any)?.data?.id ?? null;
+    const identifier = (issue as any)?.identifier ?? (issue as any)?.data?.identifier ?? null;
+
+    const { error: ierr } = await client.schema(sch).from("project_template_tasks").upsert(
+      {
+        linear_project_id: projectKey,
+        template_task_key: t.template_task_key,
+        linear_issue_id: issueId,
+        linear_issue_identifier: identifier,
+        title: t.title,
+      } as any,
+      {
+        onConflict: "linear_project_id,template_task_key",
+      }
+    );
+    if (ierr) throw new Error(`Supabase project_template_tasks upsert failed: ${ierr.message}`);
+
+    created.push({ template_task_key: t.template_task_key, issue_id: issueId, identifier });
+  }
+
+  await audit(env, draftDbId, "linear.kickoff.issues.created", "info", {
+    actor_telegram_user_id: actorTelegramId,
+    attio_deal_id: attioDealId,
+    count: created.length,
+    created,
+  });
+
+  return { created_issues: created };
+}
+
+async function listLinearTeams(env: Env) {
+  const composioSettings = await getSettingsValue(env, "composio");
+  const linearConn = (composioSettings?.linear_connection_id as string | null) ?? null;
+  if (!linearConn) {
+    throw new Error(
+      "Composio Linear connection id is not configured. Set it via /admin composio linear <connected_account_id>"
+    );
+  }
+
+  const teams = await composioExecute(env, {
+    tool_slug: "LINEAR_GET_ALL_LINEAR_TEAMS",
+    connected_account_id: linearConn,
+    arguments: {},
+  });
+
+  return teams;
+}
+
 async function handleAdminCommand(env: Env, chatId: number, fromId: number, args: string) {
   assertAdmin(env, fromId);
 
@@ -328,7 +424,8 @@ async function handleAdminCommand(env: Env, chatId: number, fromId: number, args
         "/admin status\n" +
         "/admin composio show\n" +
         "/admin composio attio <connected_account_id>\n" +
-        "/admin composio linear <connected_account_id>\n",
+        "/admin composio linear <connected_account_id>\n" +
+        "/admin linear teams\n",
     });
     return;
   }
@@ -343,8 +440,44 @@ async function handleAdminCommand(env: Env, chatId: number, fromId: number, args
         "Status:\n" +
         `- schema: ${schema(env)}\n` +
         `- composio.attio_connection_id: ${attioConn ? attioConn : "<not set>"}\n` +
-        `- composio.linear_connection_id: ${linearConn ? linearConn : "<not set>"}\n`,
+        `- composio.linear_connection_id: ${linearConn ? linearConn : "<not set>"}\n` +
+        `- LINEAR_TEAM_ID env: ${env.LINEAR_TEAM_ID ? env.LINEAR_TEAM_ID : "<not set>"}\n`,
     });
+    return;
+  }
+
+  if (sub === "linear") {
+    const [action] = rest;
+    if (action !== "teams") {
+      await tgCall(env, "sendMessage", { chat_id: chatId, text: "Usage: /admin linear teams" });
+      return;
+    }
+
+    const teams = await listLinearTeams(env);
+
+    // Attempt to format common shapes defensively
+    const list: any[] =
+      (teams as any)?.teams ??
+      (teams as any)?.data?.teams ??
+      (teams as any)?.nodes ??
+      (teams as any)?.data?.nodes ??
+      (Array.isArray(teams) ? (teams as any[]) : []);
+
+    const lines = (list || [])
+      .slice(0, 50)
+      .map((t) => {
+        const id = t?.id ?? "<no id>";
+        const key = t?.key ? ` (${t.key})` : "";
+        const name = t?.name ?? "<no name>";
+        return `- ${name}${key}: ${id}`;
+      });
+
+    const msg =
+      "Linear teams (use the UUID as LINEAR_TEAM_ID):\n\n" +
+      (lines.length ? lines.join("\n") : "<no teams found>") +
+      "\n\nSet GitHub Actions variable LINEAR_TEAM_ID to the chosen UUID.";
+
+    await tgCall(env, "sendMessage", { chat_id: chatId, text: msg });
     return;
   }
 
@@ -513,7 +646,7 @@ async function handleCommand(env: Env, chatId: number, from: NonNullable<Telegra
           chat_id: chatId,
           text:
             `Draft создан.\n\nСделка: ${dealId}\n\n` +
-            "Apply подготовит перенос в «Выиграно» и создаст Linear project и 12 задач.\n\n" +
+            "Apply переведёт стадию в «Выиграно» и создаст Linear kickoff (12 задач).\n\n" +
             "Применить/Отмена?",
           reply_markup: JSON.stringify(buildInlineKeyboard(draftDbId)),
         });
@@ -619,6 +752,43 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
       await tgCall(env, "sendMessage", {
         chat_id: chatId,
         text: `Готово. Сделка ${dealId} переведена в стадию: ${resolved.stage_name}`,
+      });
+      return;
+    }
+
+    if (first?.type === "deal.won") {
+      const dealId = first.attio_deal_id as string;
+
+      const teamId = env.LINEAR_TEAM_ID?.trim();
+      if (!teamId) {
+        const friendly =
+          "Не настроен LINEAR_TEAM_ID.\n\n" +
+          "Сделай одно из двух:\n" +
+          "1) Выполни /admin linear teams и выбери UUID\n" +
+          "2) Добавь GitHub Actions variable LINEAR_TEAM_ID\n\n" +
+          "После деплоя бот начнёт использовать эту команду.";
+
+        await finishApplyAttempt(env, attemptId, { ok: false }, "LINEAR_TEAM_ID not set");
+        await tgCall(env, "sendMessage", { chat_id: chatId, text: friendly });
+        return;
+      }
+
+      const wonStage = await resolveStageName(env, "выиграно");
+      if (!wonStage) throw new Error("Stage 'Выиграно' is missing in bot.deal_stages");
+      await applyDealStage(env, cb.from.id, draftDbId, dealId, wonStage.stage_name);
+
+      const kickoff = await ensureLinearKickoff(env, cb.from.id, draftDbId, dealId, teamId);
+
+      await client.schema(sch).from("drafts").update({ status: "APPLIED" } as any).eq("id", draftDbId);
+
+      await finishApplyAttempt(env, attemptId, { ok: true, kickoff }, null);
+
+      await tgCall(env, "sendMessage", {
+        chat_id: chatId,
+        text:
+          "Готово.\n\n" +
+          `Сделка ${dealId} → стадия «Выиграно».\n` +
+          `Kickoff задач создано: ${(kickoff.created_issues ?? []).length}.\n`,
       });
       return;
     }
