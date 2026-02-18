@@ -4,11 +4,13 @@ type Env = {
   TELEGRAM_BOT_TOKEN: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
+  COMPOSIO_API_KEY: string;
 
   // vars
   SUPABASE_SCHEMA?: string;
   PAUSE_REMINDER_DAYS?: string;
   BOT_ALLOWED_TELEGRAM_USER_IDS?: string;
+  LINEAR_TEAM_ID?: string;
 };
 
 type TelegramUpdate = {
@@ -89,12 +91,6 @@ function supa(env: Env) {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-async function ensureDraftTablesExist(env: Env) {
-  // No-op placeholder. We rely on SQL migrations.
-  // In early bootstrap, we just fail with helpful error if tables not found.
-  return env;
-}
-
 type DraftRow = {
   draft_id: string;
   chat_id: string;
@@ -118,18 +114,14 @@ function buildInlineKeyboard(draftId: string) {
 
 async function createDraft(env: Env, draft: Omit<DraftRow, "status"> & { status?: DraftRow["status"] }) {
   const client = supa(env);
+  const schema = env.SUPABASE_SCHEMA ?? "bot";
+
   const row: DraftRow = {
     ...draft,
     status: draft.status ?? "DRAFT",
   };
 
-  // NOTE: These draft tables are expected from earlier migrations in the repo.
-  // If they are not present yet, we will surface a clear error.
-  const { error } = await client
-    .schema(env.SUPABASE_SCHEMA ?? "bot")
-    .from("drafts")
-    .insert(row as any);
-
+  const { error } = await client.schema(schema).from("drafts").insert(row as any);
   if (error) throw new Error(`Supabase insert draft failed: ${error.message}`);
 }
 
@@ -150,7 +142,6 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
       return;
     }
 
-    // Stubs for now: we create Draft placeholders; execution will be implemented next.
     case "deal": {
       const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
       if (!sub) {
@@ -181,8 +172,7 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
 
         await tgCall(env, "sendMessage", {
           chat_id: chatId,
-          text:
-            `Draft создан.\n\nСделка: ${dealId}\nНовая стадия: ${stageText}\n\nПрименить/Отмена?`,
+          text: `Draft создан.\n\nСделка: ${dealId}\nНовая стадия: ${stageText}\n\nПрименить/Отмена?`,
           reply_markup: JSON.stringify(buildInlineKeyboard(draftId)),
         });
         return;
@@ -204,6 +194,7 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
             type: "deal.won",
             attio_deal_id: dealId,
             target_stage_key: "won",
+            linear_team_id: env.LINEAR_TEAM_ID,
             created_at: nowIso(),
           },
         });
@@ -217,7 +208,10 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
         return;
       }
 
-      await tgCall(env, "sendMessage", { chat_id: chatId, text: "Пока реализовано: /deal stage, /deal won (Draft only)." });
+      await tgCall(env, "sendMessage", {
+        chat_id: chatId,
+        text: "Пока реализовано: /deal stage, /deal won (Draft). Apply/Cancel + executor — следующий коммит.",
+      });
       return;
     }
 
@@ -265,8 +259,6 @@ export default {
     }
 
     try {
-      await ensureDraftTablesExist(env);
-
       if (update.message?.text) {
         const fromId = update.message.from?.id;
         const chatId = update.message.chat.id;
@@ -274,10 +266,8 @@ export default {
         if (allowed && !allowed.has(fromId)) return json({ ok: true });
 
         const parsed = parseCommand(update.message.text);
-        if (!parsed) {
-          // ignore non-commands for now
-          return json({ ok: true });
-        }
+        if (!parsed) return json({ ok: true });
+
         await handleCommand(env, chatId, fromId, parsed.cmd, parsed.args);
         return json({ ok: true });
       }
