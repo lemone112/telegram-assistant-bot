@@ -1,7 +1,6 @@
--- 0003_design_studio_sales_to_linear.sql
--- Design Studio: Sales (Attio deals) → Production (Linear projects/issues)
-
--- NOTE: Repository uses schema `bot`.
+-- Baseline migration 0004
+-- Purpose: Design Studio (Attio deals) -> Production (Linear projects/issues)
+-- NOTE: Repository convention: use schema "bot".
 
 -- 1) Deal stages (canonical list + ordering + semantics)
 CREATE TABLE IF NOT EXISTS bot.deal_stages (
@@ -15,15 +14,14 @@ CREATE TABLE IF NOT EXISTS bot.deal_stages (
   CONSTRAINT deal_stages_stage_name_unique UNIQUE(stage_name)
 );
 
--- 2) Aliases to map free-form input → stage_key
+-- 2) Aliases to map free-form input -> stage_key
 CREATE TABLE IF NOT EXISTS bot.deal_stage_aliases (
   alias text PRIMARY KEY,
   stage_key text NOT NULL REFERENCES bot.deal_stages(stage_key) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- 3) Link Attio deal → Linear project (1:1)
--- We keep IDs as text because Attio record IDs are UUID-like strings.
+-- 3) Link Attio deal -> Linear project (1:1)
 CREATE TABLE IF NOT EXISTS bot.deal_linear_links (
   attio_deal_id text PRIMARY KEY,
   linear_project_id text NOT NULL,
@@ -48,17 +46,16 @@ CREATE TABLE IF NOT EXISTS bot.project_template_tasks (
 CREATE TABLE IF NOT EXISTS bot.reminders (
   reminder_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   attio_deal_id text NOT NULL,
-  reminder_type text NOT NULL, -- e.g. 'deal_paused_n_days'
+  reminder_type text NOT NULL,
   due_at timestamptz NOT NULL,
-  status text NOT NULL DEFAULT 'scheduled', -- scheduled | sent | cancelled
+  status text NOT NULL DEFAULT 'scheduled',
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
-
-CREATE INDEX IF NOT EXISTS reminders_due_at_idx ON bot.reminders (due_at);
-CREATE INDEX IF NOT EXISTS reminders_status_due_at_idx ON bot.reminders (status, due_at);
-CREATE INDEX IF NOT EXISTS reminders_deal_idx ON bot.reminders (attio_deal_id);
+CREATE INDEX IF NOT EXISTS reminders_due_at_idx ON bot.reminders(due_at);
+CREATE INDEX IF NOT EXISTS reminders_status_due_at_idx ON bot.reminders(status, due_at);
+CREATE INDEX IF NOT EXISTS reminders_deal_idx ON bot.reminders(attio_deal_id);
 
 -- Seed canonical stages
 INSERT INTO bot.deal_stages(stage_key, stage_name, order_index, is_terminal, is_hold)
@@ -78,7 +75,7 @@ SET stage_name = EXCLUDED.stage_name,
     is_terminal = EXCLUDED.is_terminal,
     is_hold = EXCLUDED.is_hold;
 
--- Seed a few pragmatic aliases (extend later)
+-- Seed pragmatic aliases
 INSERT INTO bot.deal_stage_aliases(alias, stage_key)
 VALUES
   ('лид', 'new_lead'),

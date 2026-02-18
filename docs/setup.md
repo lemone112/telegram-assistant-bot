@@ -15,7 +15,7 @@ Add these in: GitHub → Settings → Secrets and variables → Actions.
 ### Variables (recommended)
 - `CF_WORKER_NAME` (default: `telegram-assistant-bot`)
 - `SUPABASE_SCHEMA` (default: `bot`)
-- `SUPABASE_PROJECT_REF` (example: `igobxicuyfzkpoekamwt`)
+- `SUPABASE_PROJECT_REF` (example: `igobxicu yfz kpoekamwt`)
 - `PAUSE_REMINDER_DAYS` (default: `7`)
 - `BOT_ALLOWED_TELEGRAM_USER_IDS` (comma-separated telegram user IDs)
 - `LINEAR_TEAM_ID` (example: `9bb39310-30fb-49d4-936f-041f7c83b494`)
@@ -41,8 +41,9 @@ Use Bot API `setWebhook`.
 Apply migrations in `supabase/migrations/*`.
 
 Important:
-- tables are created under schema `bot`
-- if PostgREST schema cache does not expose `bot.*`, server-side SQL still works
+- all application tables are created under schema `bot`
+- destructive reset is DEV-ONLY: see `supabase/dev/reset_app.sql`
+- baseline docs: `docs/supabase/migrations-baseline.md`
 
 ## 5) Composio execution
 
@@ -53,6 +54,6 @@ Minimal requirements:
 - each operation is executed only after Draft → Apply
 
 Idempotency policy:
-- Draft apply: `(draft_id, callback_query_id)`
+- Draft apply gate: `bot.idempotency_keys` (e.g. `tg:callback:<callback_query_id>`)
 - One Linear project per Attio deal: `bot.deal_linear_links.attio_deal_id` PK
 - One template task per Linear project: `(linear_project_id, template_task_key)` PK
