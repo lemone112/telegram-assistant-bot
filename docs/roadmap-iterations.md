@@ -19,6 +19,13 @@ Every PR must be reviewed with special attention to **Codex** review comments.
 - Treat Codex findings as a checklist: either fix the code or explicitly justify why not.
 - Do not merge when Codex flags: idempotency gaps, unsafe tool routing, missing allowlists, or retry/rate-limit issues.
 
+## External dependencies (blocking contracts)
+
+- **LightRAG knowledge DB** (external server)
+  - DB requirements: `docs/lightrag-db-requirements.md`
+  - Must provide: grounded citations, entity linking, and server-side ACL filtering.
+  - Integration is planned under Iteration 5 (Reports), but LightRAG readiness is a prerequisite.
+
 ---
 
 ## Planning gate (Iteration 0) — COMPLETE ✅
@@ -80,6 +87,15 @@ These flows define “the bot is ready”. We implement them progressively and m
 ## Iteration 1 (P0) — Safety backbone + deterministic execution model
 
 **Goal:** make it *impossible* to accidentally write without Draft and *impossible* to duplicate side-effects.
+
+### Implementation tracker (GitHub Issues)
+
+- #11 Tool allowlists/denylist + strict query vs mutate gate
+- #12 Idempotency ledger (key → result)
+- #13 Error taxonomy + user-facing renderer
+- #14 Retry/backoff wrapper
+- #15 Bulk risk gate + extra confirmation
+- #16 Per-action observability
 
 ### Deliverables
 
@@ -152,6 +168,13 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 3 (P0) — Voice pipeline (STT) with transcript confirmation
 
+### Voice limits (v1)
+
+- Max duration: **120s**
+- Max file size: **20 MB**
+- Language: RU/EN autodetect (best-effort)
+- Low-confidence threshold: **< 0.70** → require explicit user confirm/edit
+
 **Goal:** voice is first-class and reliable.
 
 ### Deliverables
@@ -204,7 +227,19 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 5 (P1) — Reports v1 (Attio + Linear) with export/caching
 
+### CSV export format (v1)
+
+- Encoding: UTF-8
+- Delimiter: comma (`,`)
+- Max rows: 5,000 (beyond → ask user to narrow filter)
+- File naming: `report_<type>_<YYYY-MM-DD>.csv`
+
 **Goal:** high-utility read-only experiences.
+
+### Minimum mapping persistence (v1)
+
+- Persist at least: `attio:deal:*` → `[linear:issue:*]` (created/linked)
+- Prefer also: `attio:deal:*` → `linear:project:*` when tool support exists
 
 ### Deliverables
 
@@ -271,6 +306,10 @@ These flows define “the bot is ready”. We implement them progressively and m
 ---
 
 ## Iteration 8 (P1/P2) — Production hardening & test matrix
+
+### Feature freeze rule
+
+- Before starting Iteration 8, declare **feature freeze** for v1 scope (only bugfixes allowed).
 
 **Goal:** stability under real conditions.
 
