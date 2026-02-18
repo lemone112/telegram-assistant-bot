@@ -1,25 +1,23 @@
-# Iterations roadmap (final plan)
+# Iterations roadmap (authoritative)
 
-This document is the execution plan for the repository.
+This document is the **authoritative execution plan** for this repository. It is intentionally written as an engineering backlog with clear priorities.
 
 ## Guiding principles
 
 - **DB contract is canonical**: see `docs/supabase/db-contract.md`.
 - All runtime tables live in schema `bot`.
 - Destructive resets are DEV-only.
-- Every external side-effect must be gated by Draft → Apply and idempotency.
+- Every external side-effect MUST be gated by **Draft → Apply** and **idempotency**.
 - Prefer small PRs that keep code + migrations aligned.
 
----
-
-## Current state (what is already shipped)
+## Current state (already shipped)
 
 ### Draft engine
 
-- Drafts are stored in `bot.drafts` (PK `id uuid`).
-- Draft author is enforced via FK `bot.drafts.telegram_user_id -> bot.telegram_users.id`.
+- Drafts stored in `bot.drafts` (PK `id uuid`).
+- Draft author enforced via FK `bot.drafts.telegram_user_id -> bot.telegram_users.id`.
 - Idempotency gate uses `bot.idempotency_keys` with keys like `tg:callback:<callback_query_id>`.
-- Apply observability is stored in `bot.draft_apply_attempts`.
+- Apply observability stored in `bot.draft_apply_attempts`.
 
 ### Admin / ops
 
@@ -32,7 +30,32 @@ This document is the execution plan for the repository.
 
 ---
 
-## Iteration 1 — `/deal stage` production-grade
+## Iteration P0.1 — UX/UI foundation (CryptoBot-style)
+
+**Goal:** consistent Telegram UX with inline keyboards, pagination, and a single interaction model.
+
+- [ ] Implement message renderer (Card/List/Draft/Result) with consistent formatting.
+- [ ] Implement callback payload schema `v1|...` (versioned) + parser.
+- [ ] Add pagination helper for list outputs (Prev/Next + pick).
+- [ ] Add Draft expiry handling (`expires_at`) + “Rebuild draft” button.
+- [ ] Add `/help` with examples for free-form and slash commands.
+
+Docs:
+- [ ] Add `docs/ux.md` (this repo-level spec).
+
+## Iteration P0.2 — Router: free-form text + voice → Composio MCP plan
+
+**Goal:** any message becomes a structured plan routed to Attio/Linear tools.
+
+- [ ] Add STT pipeline for voice → text (provider TBD) + store transcript.
+- [ ] Define planner output schema: `intent (query|mutate)`, `domain`, `actions[]`, `needs_clarification[]`.
+- [ ] Implement clarification loop (persist pending questions in DB, buttons for common answers).
+- [ ] Add safety policy:
+  - Always Draft-gate mutations
+  - Read-only queries may auto-run, but still logged
+  - Bulk operations require additional confirmation (count threshold)
+
+## Iteration P0.3 — `/deal stage` production-grade (Attio)
 
 **Goal:** stable Draft → Apply for stage changes in Attio.
 
@@ -40,11 +63,11 @@ This document is the execution plan for the repository.
 - [x] Author enforcement via `bot.telegram_users` FK
 - [x] Idempotency via `bot.idempotency_keys`
 - [x] Apply observability via `bot.draft_apply_attempts`
-- [ ] Improve user-facing preview (include resolved stage_name before Apply)
+- [ ] Improve user-facing preview (include resolved `stage_name` before Apply)
 - [ ] Add explicit Draft expiry handling (`expires_at`) + UX messaging
 - [ ] Add better error taxonomy (Attio/Composio/Supabase)
 
-## Iteration 2 — Admin/ops hardening
+## Iteration P0.4 — Admin hardening
 
 **Goal:** no manual DB editing required for day-to-day ops.
 
@@ -52,58 +75,61 @@ This document is the execution plan for the repository.
 - [x] `/admin composio show`
 - [x] `/admin composio attio <id>` (merge-patch)
 - [x] `/admin composio linear <id>`
-- [ ] Add `/admin env check` (validates required env vars and prints what’s missing)
-- [ ] Add `/admin linear teams` (allowlist) to list teams and choose `LINEAR_TEAM_ID` (optional but recommended)
+- [ ] Add `/admin env check` (validate required env vars and print what’s missing)
+- [ ] Add `/admin linear teams` (allowlist) to list teams and choose `LINEAR_TEAM_ID`
 
-## Iteration 3 — `/deal won` Apply (MVP → production)
+## Iteration P1.1 — Queries & reports (Attio + Linear)
 
-**Goal:** stage=won + Linear kickoff.
+**Goal:** support read-only questions with the same UX quality.
+
+- [ ] `/report clients weekly` (Attio): summary + top changes
+- [ ] `/report pipeline` (Attio): counts by stage + deltas
+- [ ] `/report projects <deal>` (Linear): project/issues grouped by state
+- [ ] Report pagination + export (CSV) + refresh button
+- [ ] Caching strategy in DB (short TTL) for report queries
+
+## Iteration P1.2 — `/deal won` Apply (Linear kickoff)
+
+**Goal:** stage=won triggers Linear kickoff.
 
 Phase 3A (MVP):
-- [x] Enforce `LINEAR_TEAM_ID` from env with a friendly error if missing.
-- [ ] Create 12 kickoff issues from the template (idempotent).
+- [x] Enforce `LINEAR_TEAM_ID` from env with friendly error if missing
+- [ ] Create 12 kickoff issues from template (idempotent)
 
 Phase 3B (production-quality):
-- [ ] Create a Linear **Project** (name rule: `Company — Deal name`).
-- [ ] Persist mapping in `bot.deal_linear_links` (Attio deal → Linear project).
-- [ ] Create the 12 kickoff issues **inside the project**.
-- [ ] Backlink to Attio (NOTE is preferred as the default).
+- [ ] Create a Linear **Project** (name rule: `Company — Deal name`)
+- [ ] Persist mapping in `bot.deal_linear_links` (Attio deal → Linear project)
+- [ ] Create 12 kickoff issues **inside the project**
+- [ ] Backlink to Attio (NOTE preferred as default)
 
-> Caveat: whether we can create a Linear Project depends on available tools. If not available, use Linear GraphQL mutation via a supported mechanism and document it.
-
-## Iteration 4 — Visibility commands
+## Iteration P1.3 — Visibility commands
 
 **Goal:** make the bot useful without context switching.
 
 - [ ] `/deal find <text>` (Attio query)
 - [ ] `/deal view <id>`
 - [ ] `/pipeline`
+- [ ] `/linear issue <key>` view (basic)
 
-## Iteration 5 — Reminders
+## Iteration P2.1 — Reminders
 
-**Goal:** automate follow-ups for paused deals.
-
-- [ ] On stage change to `paused`, schedule reminder in `bot.reminders` (due_at = now + PAUSE_REMINDER_DAYS)
+- [ ] On stage change to `paused`, schedule reminder in `bot.reminders` (due_at = now + `PAUSE_REMINDER_DAYS`)
 - [ ] Scheduled job to send reminders and mark `sent/cancelled`
 - [ ] `/admin reminders` to inspect queue
 
-## Iteration 6 — `/task` end-to-end
-
-**Goal:** create Linear issues from Telegram with correct routing.
+## Iteration P2.2 — `/task` end-to-end
 
 - [ ] `/task <text>` Draft → Apply
 - [ ] Project/state selection rules
 - [ ] Optionally link issue back to deal/project
 
-## Iteration 7 — `/client-mass` bulk
-
-**Goal:** bulk create/update Attio companies/people/notes.
+## Iteration P2.3 — Bulk import (`/client-mass`)
 
 - [ ] Parse bulk blocks into `bot.draft_bulk_items`
 - [ ] Preview + per-item validation
 - [ ] Apply with batching + idempotency + audit
 
-## Iteration 8 — Timezone + UX polish
+## Iteration P2.4 — Timezone + UX polish
 
 - [ ] `/tz` per user
 - [ ] Better message formatting, retries, and clearer UX
