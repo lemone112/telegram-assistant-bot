@@ -155,9 +155,14 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Double-click Apply on same Draft → only one side-effect, second returns stored result.
-- Simulated 429 from upstream → retries, no duplicates.
-- Planner suggests unknown tool → blocked with CONFIG/SECURITY message.
+- Callback replay: same `callback_query_id` received twice → second returns stored result, no extra DB writes.
+- Operation replay: same side-effect key (e.g. `linear:create_issue:<deal>:<template_key>`) executed twice via different callbacks → second returns stored result.
+- Concurrency: two Apply requests in parallel for same Draft → exactly one wins, one observes `in_progress` and then returns stored `succeeded` result.
+- Retry safety: simulate 429 then success → ledger stores final external ids and prevents duplicate creates.
+- Error classification: missing env var → CONFIG; invalid user input → USER_INPUT; upstream 5xx → UPSTREAM; DB down → DB.
+- Allowlist enforcement: planner attempts a non-allowlisted mutate tool → blocked; planner attempts mutate while intent=query → forced Draft or blocked.
+- Bulk gate: 5 ops triggers extra confirmation; 4 ops does not.
+- Logging: per-action outcomes include correlation id and external ids; no secrets in logs.
 
 ### DoD
 
@@ -187,8 +192,13 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- NS2 fully passes using List→Pick→Card.
-- Pagination works for >8 items and does not leak other user's sessions.
+- List pagination: 25 items → pages 1–4, Prev/Next works, and Pick indexes map correctly per page.
+- Pick ownership: user B cannot pick from user A’s list session (blocked USER_INPUT).
+- Callback payload validation: malformed/unknown version payload → safe error, no side-effects.
+- Draft expiry UX: expired draft Apply → shows expired message + rebuild option; does not run.
+- Hub: `/menu` is idempotent (multiple presses update/replace same hub message without spam).
+- Message formatting: no message exceeds Telegram limits in typical scenarios; long fields are truncated with `…`.
+- Accessibility: buttons order is consistent across Card/List/Draft/Result.
 
 ### DoD
 
@@ -221,7 +231,12 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- NS1 steps 1–2 pass.
+- Voice >120s or >20MB → immediate friendly error + ask for text; no STT attempt.
+- Voice RU: transcript produced; user edits transcript; edited text is used for planning.
+- Voice EN: transcript produced; language preserved.
+- Low-confidence (<0.70): bot forces confirm/edit (no auto-plan).
+- STT provider failure/timeout: bot responds with fallback to text and logs UPSTREAM.
+- Duplicate voice update delivery (webhook redelivery): transcript step is idempotent and does not create multiple drafts.
 
 ### DoD
 
@@ -248,7 +263,13 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- NS1 fully passes end-to-end.
+- Deal search ambiguous: returns Pick list; selecting candidate persists mapping for the user session.
+- Deal search exact: goes straight to Card.
+- Stage alias input: user uses alias → preview shows resolved canonical stage name.
+- No-op: setting stage to current stage returns Result explaining “already in stage” and does not call upstream.
+- Apply idempotency: repeating stage change Apply returns stored success.
+- Upstream rate limit: 429 on stage update → retries; no duplicate write.
+- Permissions: Attio access denied → UPSTREAM error; Draft remains but Apply blocked.
 
 ### DoD
 
@@ -285,8 +306,12 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- NS4 passes.
-- NS5 passes (mapping fallback uses Pick list).
+- Pipeline report: counts by stage render; refresh within TTL uses cache; refresh after TTL refetches.
+- Export CSV: produces valid UTF-8 CSV, correct filename, row count <= 5,000; if >5,000 → asks to narrow filter.
+- Cache key isolation: two users same query do not see each other’s cached data if ACL differs.
+- Status by deal mapping missing: bot asks Pick/search; after pick mapping persists and next run is direct.
+- Linear down: status by deal returns clear error and suggests retry; other Attio reports still work.
+- Grounding rule: if report includes any derived statement from history (post-v1), citations must be present (guarded).
 
 ### DoD
 
@@ -311,7 +336,12 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- NS3 passes.
+- Kickoff Draft always shows bulk warning + extra confirm.
+- Apply creates 12 issues; ledger stores all issue ids.
+- Apply replay: repeating Apply returns same 12 ids, does not create duplicates.
+- Partial failure: if 3/12 issues created then upstream fails, rerun completes remaining without duplicating existing (per-template-task idempotency).
+- Team misconfig: missing LINEAR_TEAM_ID → CONFIG error with admin guidance.
+- Rate limit: 429 mid-creation → retry completes without duplicates.
 
 ---
 
@@ -324,6 +354,14 @@ These flows define “the bot is ready”. We implement them progressively and m
 - `/admin audits last`
 - `/admin draft <id>` inspect
 - Clear guidance for recovery paths
+
+### Acceptance tests
+
+- `/admin env check` lists missing env vars and shows which features are blocked.
+- `/admin linear teams` returns list and confirms selected team id.
+- `/admin audits last` shows last N apply attempts with external ids.
+- `/admin draft <id>` can inspect a draft and its apply attempts.
+- Admin commands are access-controlled (non-admin users cannot call them).
 
 ### DoD
 
@@ -342,6 +380,13 @@ These flows define “the bot is ready”. We implement them progressively and m
 - Automated regression for NS1–NS5
 - Load sanity (double-click storms)
 - Monitoring docs
+
+### Acceptance tests
+
+- NS1–NS5 scripted run passes in staging and production.
+- Load storm: 50 duplicate callbacks within 5 seconds → only one side-effect.
+- Degradation matrix behaviors are verified for Supabase/Composio/LightRAG down.
+- Error budget check: user-visible failure rate <2% over a test window.
 
 ### DoD
 
@@ -367,8 +412,12 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- brief returns 3–5 citations
-- promise/deadline answers contain citations
+- `brief` returns summary + 3–5 citations with stable source URLs.
+- `ask` refuses to answer without citations (returns insufficient evidence).
+- ACL: user without support tag cannot retrieve Chatwoot citations.
+- Entity linking: ambiguous company/deal prompts Pick; confirmed mapping persists and is reused next time.
+- LightRAG down: bot shows degradation message and continues with non-RAG flows.
+- Injection resistance: prompt injection in retrieved chat text does not bypass citations/allowlists.
 
 ---
 
