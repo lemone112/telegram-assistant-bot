@@ -27,20 +27,22 @@ This document turns the product/architecture notes into an execution-oriented se
 **Goal:** no manual DB editing required for day-to-day ops.
 
 - [x] `/admin status`
-- [x] `/admin composio attio <id>`
 - [x] `/admin composio show`
-- [x] `/admin composio linear <id>` (store now, use later)
-- [ ] Add `/admin secrets check` style command (validates required env vars at runtime)
+- [x] `/admin composio attio <id>` (merge-patch)
+- [x] `/admin composio linear <id>`
+- [ ] Add `/admin env check` (validates required env vars at runtime)
 
 ## Iteration 3 — `/deal won` Apply (MVP)
 
-**Goal:** stage=won + create Linear project + template tasks.
+**Goal:** stage=won + create Linear kickoff.
 
-- [ ] Implement Apply for action type `deal.won`
+- [x] Enforce `LINEAR_TEAM_ID` from env (friendly error if missing)
 - [ ] Create Linear Project (name: `Company — Deal name` rule)
 - [ ] Create 12 template tasks idempotently (`bot.project_template_tasks`)
 - [ ] Persist mapping (`bot.deal_linear_links`)
 - [ ] Backlink to Attio (note or URL field)
+
+> Note: in the current code we can create Linear issues via Composio, but Linear project creation tool may be missing; MVP falls back to issues without project_id.
 
 ## Iteration 4 — Visibility commands
 
