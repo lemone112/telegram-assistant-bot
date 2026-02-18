@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { composioExecute } from "./composio";
+import { KICKOFF_TEMPLATE_TASKS } from "./linear_kickoff_template";
 
 type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -11,6 +12,7 @@ type Env = {
   SUPABASE_SCHEMA?: string;
   PAUSE_REMINDER_DAYS?: string;
   BOT_ALLOWED_TELEGRAM_USER_IDS?: string;
+  LINEAR_TEAM_ID?: string;
 };
 
 type TelegramUpdate = {
@@ -280,6 +282,13 @@ async function resolveStageName(env: Env, stageInput: string): Promise<{ stage_k
   return null;
 }
 
+function linearTeamIdOrThrow(env: Env): string {
+  const v = env.LINEAR_TEAM_ID?.trim();
+  if (v) return v;
+  // Friendly guidance. We can't auto-pick a team safely.
+  return "";
+}
+
 async function applyDealStage(env: Env, actorTelegramId: number, draftDbId: string, dealId: string, stageInput: string) {
   const composioSettings = await getSettingsValue(env, "composio");
   const attioConn = (composioSettings?.attio_connection_id as string | null) ?? null;
@@ -315,6 +324,120 @@ async function applyDealStage(env: Env, actorTelegramId: number, draftDbId: stri
   return resolved;
 }
 
+async function ensureLinearKickoff(
+  env: Env,
+  actorTelegramId: number,
+  draftDbId: string,
+  attioDealId: string,
+  linearTeamId: string
+) {
+  const client = supa(env);
+  const sch = schema(env);
+
+  const composioSettings = await getSettingsValue(env, "composio");
+  const linearConn = (composioSettings?.linear_connection_id as string | null) ?? null;
+  if (!linearConn) {
+    throw new Error(
+      "Composio Linear connection id is not configured. Set it via /admin composio linear <connected_account_id>"
+    );
+  }
+
+  // 1) Check mapping (idempotent)
+  const { data: existingLink, error: lerr } = await client
+    .schema(sch)
+    .from("deal_linear_links")
+    .select("attio_deal_id,linear_project_id,linear_team_id,project_name")
+    .eq("attio_deal_id", attioDealId)
+    .maybeSingle();
+  if (lerr) throw new Error(`Supabase deal_linear_links read failed: ${lerr.message}`);
+
+  let linearProjectId: string | null = (existingLink as any)?.linear_project_id ?? null;
+  let projectName: string | null = (existingLink as any)?.project_name ?? null;
+
+  // 2) Create Linear project if needed.
+  // NOTE: We do not have a dedicated Linear "create project" tool in the current tool list.
+  // We will use issues-only kickoff for MVP if project creation is not available.
+  // To keep progress, we create issues without project_id and store mapping when project creation is implemented.
+
+  if (!linearProjectId) {
+    projectName = `Kickoff — Attio deal ${attioDealId}`;
+    await audit(env, draftDbId, "linear.kickoff.project.skipped", "info", {
+      actor_telegram_user_id: actorTelegramId,
+      attio_deal_id: attioDealId,
+      reason: "No Linear create-project tool available in this environment; creating issues without project_id",
+      linear_team_id: linearTeamId,
+    });
+  }
+
+  // 3) Create template issues idempotently via bot.project_template_tasks
+  const created: any[] = [];
+
+  for (const t of KICKOFF_TEMPLATE_TASKS) {
+    // If we don't have a project yet, use synthetic project id keyspace based on deal id.
+    const projectKey = linearProjectId ?? `deal:${attioDealId}`;
+
+    const { data: existingTask, error: terr } = await client
+      .schema(sch)
+      .from("project_template_tasks")
+      .select("linear_project_id,template_task_key,linear_issue_id,linear_issue_identifier,title")
+      .eq("linear_project_id", projectKey)
+      .eq("template_task_key", t.template_task_key)
+      .maybeSingle();
+    if (terr) throw new Error(`Supabase project_template_tasks read failed: ${terr.message}`);
+
+    if ((existingTask as any)?.linear_issue_id) {
+      continue;
+    }
+
+    const issue = await composioExecute(env, {
+      tool_slug: "LINEAR_CREATE_LINEAR_ISSUE",
+      connected_account_id: linearConn,
+      arguments: {
+        team_id: linearTeamId,
+        title: t.title,
+        description: t.description,
+        // project_id intentionally omitted if we don't have a project yet.
+      },
+    });
+
+    const issueId = (issue as any)?.id ?? (issue as any)?.data?.id ?? null;
+    const identifier = (issue as any)?.identifier ?? (issue as any)?.data?.identifier ?? null;
+
+    // Persist idempotently
+    const { error: ierr } = await client.schema(sch).from("project_template_tasks").upsert(
+      {
+        linear_project_id: projectKey,
+        template_task_key: t.template_task_key,
+        linear_issue_id: issueId,
+        linear_issue_identifier: identifier,
+        title: t.title,
+      } as any,
+      {
+        onConflict: "linear_project_id,template_task_key",
+      }
+    );
+    if (ierr) throw new Error(`Supabase project_template_tasks upsert failed: ${ierr.message}`);
+
+    created.push({ template_task_key: t.template_task_key, issue_id: issueId, identifier });
+  }
+
+  // Store mapping if we have a real project id (future).
+  if (linearProjectId) {
+    const { error: uerr } = await client.schema(sch).from("deal_linear_links").upsert(
+      {
+        attio_deal_id: attioDealId,
+        linear_project_id: linearProjectId,
+        linear_team_id: linearTeamId,
+        project_name: projectName,
+      } as any,
+      { onConflict: "attio_deal_id" }
+    );
+    if (uerr) throw new Error(`Supabase deal_linear_links upsert failed: ${uerr.message}`);
+  }
+
+  return { linear_project_id: linearProjectId, project_name: projectName, created_issues: created };
+}
+
 async function handleAdminCommand(env: Env, chatId: number, fromId: number, args: string) {
   assertAdmin(env, fromId);
 
@@ -328,7 +451,7 @@ async function handleAdminCommand(env: Env, chatId: number, fromId: number, args
         "/admin status\n" +
         "/admin composio show\n" +
         "/admin composio attio <connected_account_id>\n" +
-        "/admin composio linear <connected_account_id>\n",
+        "/admin composio linear <connected_account_id>\n", 
     });
     return;
   }
@@ -343,7 +466,8 @@ async function handleAdminCommand(env: Env, chatId: number, fromId: number, args
         "Status:\n" +
         `- schema: ${schema(env)}\n` +
         `- composio.attio_connection_id: ${attioConn ? attioConn : "<not set>"}\n` +
-        `- composio.linear_connection_id: ${linearConn ? linearConn : "<not set>"}\n`,
+        `- composio.linear_connection_id: ${linearConn ? linearConn : "<not set>"}\n` +
+        `- LINEAR_TEAM_ID env: ${env.LINEAR_TEAM_ID ? env.LINEAR_TEAM_ID : "<not set>"}\n`,
     });
     return;
   }
@@ -513,7 +637,7 @@ async function handleCommand(env: Env, chatId: number, from: NonNullable<Telegra
           chat_id: chatId,
           text:
             `Draft создан.\n\nСделка: ${dealId}\n\n` +
-            "Apply подготовит перенос в «Выиграно» и создаст Linear project и 12 задач.\n\n" +
+            "Apply переведёт стадию в «Выиграно» и создаст Linear kickoff (12 задач).\n\n" +
             "Применить/Отмена?",
           reply_markup: JSON.stringify(buildInlineKeyboard(draftDbId)),
         });
@@ -619,6 +743,45 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
       await tgCall(env, "sendMessage", {
         chat_id: chatId,
         text: `Готово. Сделка ${dealId} переведена в стадию: ${resolved.stage_name}`,
+      });
+      return;
+    }
+
+    if (first?.type === "deal.won") {
+      const dealId = first.attio_deal_id as string;
+
+      const teamId = env.LINEAR_TEAM_ID?.trim();
+      if (!teamId) {
+        const friendly =
+          "Не настроен LINEAR_TEAM_ID.\n\n" +
+          "Сделай одно из двух:\n" +
+          "1) Добавь GitHub Actions variable LINEAR_TEAM_ID\n" +
+          "2) Или узнай team_id через Linear и вставь его\n\n" +
+          "Подсказка: я могу вывести список команд через инструмент, но в рантайме мы не выбираем автоматически.";
+
+        await finishApplyAttempt(env, attemptId, { ok: false }, "LINEAR_TEAM_ID not set");
+        await tgCall(env, "sendMessage", { chat_id: chatId, text: friendly });
+        return;
+      }
+
+      // Stage -> won in Attio (reuse deal.stage update)
+      // We intentionally use the canonical stage name from bot.deal_stages.
+      const wonStage = await resolveStageName(env, "выиграно");
+      if (!wonStage) throw new Error("Stage 'Выиграно' is missing in bot.deal_stages");
+      await applyDealStage(env, cb.from.id, draftDbId, dealId, wonStage.stage_name);
+
+      const kickoff = await ensureLinearKickoff(env, cb.from.id, draftDbId, dealId, teamId);
+
+      await client.schema(sch).from("drafts").update({ status: "APPLIED" } as any).eq("id", draftDbId);
+
+      await finishApplyAttempt(env, attemptId, { ok: true, kickoff }, null);
+
+      await tgCall(env, "sendMessage", {
+        chat_id: chatId,
+        text:
+          "Готово.\n\n" +
+          `Сделка ${dealId} → стадия «Выиграно».\n` +
+          `Kickoff задач создано: ${(kickoff.created_issues ?? []).length}.\n`,
       });
       return;
     }
