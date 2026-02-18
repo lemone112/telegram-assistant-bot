@@ -374,6 +374,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 10 (P0) — Entity graph navigator
 
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 10 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
+
 ### Deliverables (detailed)
 
 - Unified "everything" view with tabs/sections
@@ -383,6 +404,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 11 (P0) — Action items extraction (Chatwoot → Draft tasks)
 
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 11 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
+
 ### Deliverables (detailed)
 
 - Extract tasks with citations per item
@@ -391,6 +433,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 ---
 
 ## Iteration 12 (P1) — Advanced planner + bounded clarifications + Draft edit
+
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 12 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
 
 ### Deliverables (detailed)
 
@@ -402,6 +465,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 13 (P1) — Reminders + digests (opt-in)
 
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 13 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
+
 ### Deliverables (detailed)
 
 - opt-in subscriptions
@@ -410,6 +494,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 ---
 
 ## Iteration 14 (P1) — Settings UX
+
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 14 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
 
 ### Deliverables (detailed)
 
@@ -420,6 +525,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 15 (P1) — Bulk import `/client-mass` (optional)
 
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 15 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
+
 ### Deliverables (detailed)
 
 - preview + validation + idempotent apply
@@ -427,6 +553,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 ---
 
 ## Iteration 16 (P0) — Security hardening & compliance
+
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 16 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
 
 ### Deliverables (detailed)
 
@@ -438,6 +585,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 17 (P0) — Observability, SLO, incident playbooks
 
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 17 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
+
 ### Deliverables (detailed)
 
 - metrics & alerts
@@ -448,6 +616,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 18 (P1) — Release engineering
 
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 18 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
+
 ### Deliverables (detailed)
 
 - staging/canary
@@ -456,6 +645,27 @@ These flows define “the bot is ready”. We implement them progressively and m
 ---
 
 ## Iteration 19 (P0) — QA automation & regression gates
+
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 19 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
 
 ### Deliverables (detailed)
 
@@ -466,11 +676,67 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 20 (P0) — GA launch
 
+### Dependencies
+
+- Iteration 1 (ledger + allowlists)
+- Iteration 2 (pagination/pick UX)
+
+### Acceptance tests
+
+- Core scenario for Iteration 20 runs end-to-end in staging
+- No missing citations when grounded answers are expected
+- No data leakage across ACL boundaries
+
+### DoD
+
+- Feature is accessible from `/menu` hub (when relevant)
+- All mutations are Draft-gated and idempotent
+
+### Pitfalls
+
+- If mapping is missing, must use Pick list + persist confirmed mapping
+- Avoid wall-of-text; paginate
+
 ### Deliverables (detailed)
 
 - onboarding
 - docs
 - support loop
+
+---
+
+# Release checklist (GA cut)
+
+A release to GA is allowed only when:
+
+- North Star flows NS1–NS5 pass in staging and production.
+- LightRAG grounded answers (Iteration 9) pass with citations.
+- No open P0 safety issues (idempotency, allowlists, ACL) remain.
+- Feature freeze has been declared and only bugfix PRs merged for the last hardening window.
+- Incident playbooks exist and have been dry-run once.
+
+---
+
+# SLO targets (v1+)
+
+These are product targets (not just infra):
+
+- Query (read-only) response: p95 ≤ 3s
+- Draft generation: p95 ≤ 5s
+- Apply (mutations): p95 ≤ 20s with progress UX
+- Error rate: < 2% user-visible failures (excluding invalid input)
+
+---
+
+# Degradation matrix (must be implemented)
+
+| Dependency down | User-facing behavior | Allowed actions |
+|---|---|---|
+| Supabase down | Show `DB unavailable` + retry button, disable Apply | Read-only only (best-effort), no mutations |
+| Composio down | Show `Integrations unavailable`, keep Draft but block Apply | No mutations, queries may degrade |
+| Attio down | Show `Attio unavailable` | No Attio mutations/queries |
+| Linear down | Show `Linear unavailable` | No Linear mutations/queries |
+| LightRAG down | Show `Knowledge temporarily unavailable` | Proceed with non-RAG flows only |
 
 ---
 
