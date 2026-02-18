@@ -20,18 +20,20 @@ type TelegramUpdate = {
     date: number;
     text?: string;
     chat: { id: number; type: string; title?: string; username?: string };
-    from?: { id: number; username?: string; first_name?: string; last_name?: string };
+    from?: { id: number; username?: string; first_name?: string; last_name?: string; language_code?: string };
     entities?: Array<{ offset: number; length: number; type: string }>;
   };
   callback_query?: {
     id: string;
-    from: { id: number; username?: string; first_name?: string; last_name?: string };
+    from: { id: number; username?: string; first_name?: string; last_name?: string; language_code?: string };
     message?: { message_id: number; chat: { id: number } };
     data?: string;
   };
 };
 
-type TelegramApiResponse<T> = { ok: true; result: T } | { ok: false; description?: string; error_code?: number };
+type TelegramApiResponse<T> =
+  | { ok: true; result: T }
+  | { ok: false; description?: string; error_code?: number };
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -105,65 +107,61 @@ function supa(env: Env) {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-type DraftRow = {
-  draft_id: string;
-  chat_id: string;
-  author_telegram_user_id: string;
-  status: "DRAFT" | "APPLIED" | "CANCELLED" | "EXPIRED";
-  payload: any;
-  created_at?: string;
-  expires_at?: string;
-};
-
-function buildInlineKeyboard(draftId: string) {
+function buildInlineKeyboard(draftDbId: string) {
   return {
     inline_keyboard: [
       [
-        { text: "Применить", callback_data: `draft:apply:${draftId}` },
-        { text: "Отмена", callback_data: `draft:cancel:${draftId}` },
+        { text: "Применить", callback_data: `draft:apply:${draftDbId}` },
+        { text: "Отмена", callback_data: `draft:cancel:${draftDbId}` },
       ],
     ],
   };
 }
 
-async function createDraft(env: Env, draft: Omit<DraftRow, "status"> & { status?: DraftRow["status"] }) {
+async function upsertTelegramUser(env: Env, from: { id: number; username?: string; first_name?: string; last_name?: string; language_code?: string }) {
   const client = supa(env);
   const sch = schema(env);
 
-  const row: DraftRow = {
-    ...draft,
-    status: draft.status ?? "DRAFT",
-  };
+  // Upsert by unique telegram_user_id
+  const { data, error } = await client
+    .schema(sch)
+    .from("telegram_users")
+    .upsert(
+      {
+        telegram_user_id: from.id,
+        username: from.username ?? null,
+        first_name: from.first_name ?? null,
+        last_name: from.last_name ?? null,
+        language_code: from.language_code ?? null,
+        updated_at: nowIso(),
+      } as any,
+      { onConflict: "telegram_user_id" }
+    )
+    .select("id,telegram_user_id")
+    .maybeSingle();
 
-  const { error } = await client.schema(sch).from("drafts").insert(row as any);
-  if (error) throw new Error(`Supabase insert draft failed: ${error.message}`);
+  if (error) throw new Error(`Supabase upsert telegram_user failed: ${error.message}`);
+  if (!data?.id) throw new Error("Supabase upsert telegram_user returned no id");
+
+  return data as { id: string; telegram_user_id: number };
 }
 
-async function getSettings(env: Env, key: string): Promise<any> {
+async function audit(
+  env: Env,
+  draftDbId: string | null,
+  eventType: string,
+  level: "info" | "error" = "info",
+  payload: any = {},
+  message: string | null = null
+) {
   const client = supa(env);
   const sch = schema(env);
-  const { data, error } = await client.schema(sch).from("settings").select("value").eq("key", key).limit(1);
-  if (error) throw new Error(`Supabase settings read failed: ${error.message}`);
-  return (data?.[0] as any)?.value;
-}
-
-async function audit(env: Env, actorId: number | null, action: string, status: "success" | "failure", target?: any, errorMsg?: string) {
-  const client = supa(env);
-  const sch = schema(env);
-
-  // Baseline schema uses audit_log(event_type, level, message, payload, created_at, draft_id)
-  const payload = {
-    actor_telegram_user_id: actorId,
-    action,
-    status,
-    target: target ?? null,
-    error: errorMsg ?? null,
-  };
 
   const { error } = await client.schema(sch).from("audit_log").insert({
-    level: status === "failure" ? "error" : "info",
-    event_type: action,
-    message: status === "failure" ? errorMsg ?? null : null,
+    draft_id: draftDbId,
+    level,
+    event_type: eventType,
+    message,
     payload,
     created_at: nowIso(),
   } as any);
@@ -218,15 +216,30 @@ async function resolveStageName(env: Env, stageInput: string): Promise<{ stage_k
   return null;
 }
 
-async function applyDealStage(env: Env, actorId: number, draftId: string, dealId: string, stageInput: string) {
-  const composioSettings = await getSettings(env, "composio");
+async function applyDealStage(env: Env, actorTelegramId: number, draftDbId: string, dealId: string, stageInput: string) {
+  const client = supa(env);
+  const sch = schema(env);
+
+  const { data: settings, error: se } = await client
+    .schema(sch)
+    .from("settings")
+    .select("value")
+    .eq("key", "composio")
+    .maybeSingle();
+  if (se) throw new Error(`Supabase get settings(composio) failed: ${se.message}`);
+
+  const composioSettings = (settings as any)?.value ?? null;
   const attioConn = (composioSettings?.attio_connection_id as string | null) ?? null;
   if (!attioConn) throw new Error("Composio Attio connection id is not configured in bot.settings (key=composio)");
 
   const resolved = await resolveStageName(env, stageInput);
   if (!resolved) throw new Error(`Unknown stage: ${stageInput}`);
 
-  await audit(env, actorId, "deal.stage.update.requested", "success", { draftId, dealId, stage: resolved });
+  await audit(env, draftDbId, "deal.stage.update.requested", "info", {
+    actor_telegram_user_id: actorTelegramId,
+    deal_id: dealId,
+    stage: resolved,
+  });
 
   await composioExecute(env, {
     tool_slug: "ATTIO_UPDATE_RECORD",
@@ -240,12 +253,16 @@ async function applyDealStage(env: Env, actorId: number, draftId: string, dealId
     },
   });
 
-  await audit(env, actorId, "deal.stage.update", "success", { draftId, dealId, stage: resolved });
+  await audit(env, draftDbId, "deal.stage.update", "info", {
+    actor_telegram_user_id: actorTelegramId,
+    deal_id: dealId,
+    stage: resolved,
+  });
 
   return resolved;
 }
 
-async function handleCommand(env: Env, chatId: number, fromId: number, cmd: string, args: string) {
+async function handleCommand(env: Env, chatId: number, from: NonNullable<TelegramUpdate["message"]>["from"], cmd: string, args: string, rawText: string) {
   switch (cmd) {
     case "start":
     case "help": {
@@ -275,23 +292,35 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
           return;
         }
 
-        const draftId = crypto.randomUUID();
-        await createDraft(env, {
-          draft_id: draftId,
-          chat_id: String(chatId),
-          author_telegram_user_id: String(fromId),
-          payload: {
-            type: "deal.stage",
-            attio_deal_id: dealId,
-            stage_input: stageText,
-            created_at: nowIso(),
-          },
-        });
+        const user = await upsertTelegramUser(env, from);
+        const draftDbId = crypto.randomUUID();
+
+        const client = supa(env);
+        const sch = schema(env);
+
+        const { error } = await client.schema(sch).from("drafts").insert({
+          id: draftDbId,
+          telegram_user_id: user.id,
+          chat_id: chatId,
+          source_type: "text",
+          source_text: rawText,
+          intent_summary: "deal.stage",
+          status: "DRAFT",
+          actions: [
+            {
+              type: "deal.stage",
+              attio_deal_id: dealId,
+              stage_input: stageText,
+              created_at: nowIso(),
+            },
+          ],
+        } as any);
+        if (error) throw new Error(`Supabase insert draft failed: ${error.message}`);
 
         await tgCall(env, "sendMessage", {
           chat_id: chatId,
           text: `Draft создан.\n\nСделка: ${dealId}\nНовая стадия: ${stageText}\n\nПрименить/Отмена?`,
-          reply_markup: JSON.stringify(buildInlineKeyboard(draftId)),
+          reply_markup: JSON.stringify(buildInlineKeyboard(draftDbId)),
         });
         return;
       }
@@ -303,18 +332,30 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
           return;
         }
 
-        const draftId = crypto.randomUUID();
-        await createDraft(env, {
-          draft_id: draftId,
-          chat_id: String(chatId),
-          author_telegram_user_id: String(fromId),
-          payload: {
-            type: "deal.won",
-            attio_deal_id: dealId,
-            target_stage_key: "won",
-            created_at: nowIso(),
-          },
-        });
+        const user = await upsertTelegramUser(env, from);
+        const draftDbId = crypto.randomUUID();
+
+        const client = supa(env);
+        const sch = schema(env);
+
+        const { error } = await client.schema(sch).from("drafts").insert({
+          id: draftDbId,
+          telegram_user_id: user.id,
+          chat_id: chatId,
+          source_type: "text",
+          source_text: rawText,
+          intent_summary: "deal.won",
+          status: "DRAFT",
+          actions: [
+            {
+              type: "deal.won",
+              attio_deal_id: dealId,
+              target_stage_key: "won",
+              created_at: nowIso(),
+            },
+          ],
+        } as any);
+        if (error) throw new Error(`Supabase insert draft failed: ${error.message}`);
 
         await tgCall(env, "sendMessage", {
           chat_id: chatId,
@@ -322,7 +363,7 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
             `Draft создан.\n\nСделка: ${dealId}\n\n` +
             "Apply подготовит перенос в «Выиграно» и создаст Linear project и 12 задач.\n\n" +
             "Применить/Отмена?",
-          reply_markup: JSON.stringify(buildInlineKeyboard(draftId)),
+          reply_markup: JSON.stringify(buildInlineKeyboard(draftDbId)),
         });
         return;
       }
@@ -342,8 +383,8 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   if (!chatId) return;
 
   const data = cb.data ?? "";
-  const [prefix, action, draftId] = data.split(":");
-  if (prefix !== "draft" || !draftId) {
+  const [prefix, action, draftDbId] = data.split(":");
+  if (prefix !== "draft" || !draftDbId) {
     await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Unknown action" });
     return;
   }
@@ -351,15 +392,17 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   const client = supa(env);
   const sch = schema(env);
 
+  // Upsert user and use FK for author check
+  const user = await upsertTelegramUser(env, cb.from);
+
   // fetch draft
-  const { data: drafts, error } = await client
+  const { data: draft, error } = await client
     .schema(sch)
     .from("drafts")
-    .select("draft_id,chat_id,author_telegram_user_id,status,payload")
-    .eq("draft_id", draftId)
-    .limit(1);
+    .select("id,chat_id,telegram_user_id,status,actions")
+    .eq("id", draftDbId)
+    .maybeSingle();
   if (error) throw new Error(`Supabase draft fetch failed: ${error.message}`);
-  const draft = (drafts?.[0] as any as DraftRow) ?? null;
 
   if (!draft) {
     await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Draft not found" });
@@ -367,17 +410,23 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   }
 
   // only author can apply/cancel
-  if (String(cb.from.id) !== String(draft.author_telegram_user_id)) {
+  if (String((draft as any).telegram_user_id) !== String(user.id)) {
     await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Only draft author can do this" });
     return;
   }
 
   if (action === "cancel") {
-    const { error: e2 } = await client.schema(sch).from("drafts").update({ status: "CANCELLED" } as any).eq("draft_id", draftId);
+    const { error: e2 } = await client
+      .schema(sch)
+      .from("drafts")
+      .update({ status: "CANCELLED" } as any)
+      .eq("id", draftDbId);
     if (e2) throw new Error(`Supabase cancel failed: ${e2.message}`);
-    await audit(env, cb.from.id, "draft.cancel", "success", { draftId });
+
+    await audit(env, draftDbId, "draft.cancel", "info", { actor_telegram_user_id: cb.from.id });
+
     await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Cancelled" });
-    await tgCall(env, "sendMessage", { chat_id: chatId, text: `Draft отменён: ${draftId}` });
+    await tgCall(env, "sendMessage", { chat_id: chatId, text: `Draft отменён: ${draftDbId}` });
     return;
   }
 
@@ -392,7 +441,7 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
     const { error: idemErr } = await client
       .schema(sch)
       .from("idempotency_keys")
-      .insert({ key: idempotencyKey, draft_id: draftId } as any);
+      .insert({ key: idempotencyKey, draft_id: draftDbId } as any);
     if (idemErr) {
       await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Already applied" });
       return;
@@ -402,15 +451,17 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Applying..." });
 
   try {
-    const payload: any = (draft as any).payload;
+    const actions: any[] = ((draft as any).actions as any[]) ?? [];
+    const first = actions[0] ?? null;
 
-    if (payload?.type === "deal.stage") {
-      const dealId = payload.attio_deal_id as string;
-      const stageInput = payload.stage_input as string;
-      const resolved = await applyDealStage(env, cb.from.id, draftId, dealId, stageInput);
+    if (first?.type === "deal.stage") {
+      const dealId = first.attio_deal_id as string;
+      const stageInput = first.stage_input as string;
 
-      await client.schema(sch).from("drafts").update({ status: "APPLIED" } as any).eq("draft_id", draftId);
-      await audit(env, cb.from.id, "draft.apply", "success", { draftId, type: payload.type });
+      const resolved = await applyDealStage(env, cb.from.id, draftDbId, dealId, stageInput);
+
+      await client.schema(sch).from("drafts").update({ status: "APPLIED" } as any).eq("id", draftDbId);
+      await audit(env, draftDbId, "draft.apply", "info", { actor_telegram_user_id: cb.from.id, type: first.type });
 
       await tgCall(env, "sendMessage", {
         chat_id: chatId,
@@ -421,11 +472,11 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
 
     await tgCall(env, "sendMessage", {
       chat_id: chatId,
-      text: `Apply для типа ${(payload?.type ?? "unknown")} пока не реализован.`,
+      text: `Apply для типа ${(first?.type ?? "unknown")} пока не реализован.`,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await audit(env, cb.from.id, "draft.apply", "failure", { draftId }, msg);
+    await audit(env, draftDbId, "draft.apply", "error", { actor_telegram_user_id: cb.from.id }, msg);
     await tgCall(env, "sendMessage", { chat_id: chatId, text: `Ошибка Apply: ${msg}` });
   }
 }
@@ -450,15 +501,15 @@ export default {
 
     try {
       if (update.message?.text) {
-        const fromId = update.message.from?.id;
+        const from = update.message.from;
         const chatId = update.message.chat.id;
-        if (!fromId) return json({ ok: true });
-        if (allowed && !allowed.has(fromId)) return json({ ok: true });
+        if (!from) return json({ ok: true });
+        if (allowed && !allowed.has(from.id)) return json({ ok: true });
 
         const parsed = parseCommand(update.message.text);
         if (!parsed) return json({ ok: true });
 
-        await handleCommand(env, chatId, fromId, parsed.cmd, parsed.args);
+        await handleCommand(env, chatId, from, parsed.cmd, parsed.args, update.message.text);
         return json({ ok: true });
       }
 
