@@ -14,12 +14,14 @@ Required planning docs:
 
 ---
 
-## Iteration 0 — Planning (BLOCKER)
+## Iteration 0 — Planning (APPROVED ✅)
 
-- [ ] Write and approve v1 scope: `docs/v1-scope.md`
-- [ ] Write and approve Planner contract: `docs/planner-contract.md`
-- [ ] Write and approve UX flows: `docs/ux-flows.md`
-- [ ] Write and approve reports spec: `docs/reports-spec.md`
+Specs are written and approved:
+
+- [x] v1 scope: `docs/v1-scope.md`
+- [x] Planner contract: `docs/planner-contract.md`
+- [x] UX flows: `docs/ux-flows.md`
+- [x] Reports spec: `docs/reports-spec.md`
 
 **Definition of Done:** all docs above exist, cross-linked from README and this roadmap.
 
@@ -100,4 +102,3 @@ Required planning docs:
 - [ ] Rate limit handling + retries + backoff
 - [ ] Audit commands and logs
 - [ ] Test matrix (happy/edge/failure)
-
