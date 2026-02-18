@@ -1,0 +1,14 @@
+name = "telegram-assistant-bot"
+main = "src/index.ts"
+compatibility_date = "2026-02-18"
+
+[vars]
+SUPABASE_SCHEMA = "bot"
+PAUSE_REMINDER_DAYS = "7"
+
+# Secrets (set in Cloudflare / via GitHub Actions during deploy):
+# - TELEGRAM_BOT_TOKEN
+# - SUPABASE_URL
+# - SUPABASE_SERVICE_ROLE_KEY
+# Optional:
+# - BOT_ALLOWED_TELEGRAM_USER_IDS (or set as var)
