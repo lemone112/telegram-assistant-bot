@@ -1,2 +1,39 @@
-# telegram-assistant-bot
-Telegram assistant bot: from informal text/voice -> draft actions -> confirm Apply/Cancel -> execute in Attio (CRM) and Linear (PM) via Composio MCP. Supabase for state storage.
+# Telegram Assistant Bot (Attio + Linear via Composio MCP)
+
+Бот принимает неформальные текстовые и голосовые сообщения в Telegram, превращает их в **черновик действий** для CRM **Attio** и PM **Linear**, показывает пользователю подтверждение с кнопками **«Применить»** и **«Отмена»**, и только после подтверждения выполняет действия через **Composio MCP**.
+
+## Цели
+
+- Быстро превращать «человеческие» сообщения в структурированные действия.
+- Никогда не вносить изменения без явного подтверждения.
+- Поддерживать частичное выполнение: если Attio невозможно (не хватает данных), Linear всё равно может выполниться (и наоборот).
+- Держать хранилище и историю в Supabase, укладываясь в лимит ~500MB.
+
+## Компоненты
+
+- **Telegram Bot**: webhook-приёмник (Cloudflare Worker), отправка сообщений, inline-кнопки.
+- **Parser/Planner**: MCP Composio (LLM + routing + tool selection).
+- **Executors**: Composio tools для Attio и Linear.
+- **State Store**: Supabase Postgres (черновики, пользователи, логи, идемпотентность).
+
+## Основной UX (обязательный)
+
+1. Пользователь отправляет текст или voice.
+2. Бот создаёт **Draft** (черновик): список действий + предположения + предупреждения.
+3. Бот отправляет карточку подтверждения:
+   - что будет создано/обновлено в Attio
+   - что будет создано/обновлено в Linear
+   - две кнопки: **Применить / Отмена**
+4. По **Применить** — выполняем действия; по **Отмена** — ничего не делаем.
+
+## Документация
+
+- [Функциональная спецификация](docs/spec.md)
+- [Действия Attio](docs/attio/actions.md)
+- [Действия Linear](docs/linear/actions.md)
+- [Схема БД Supabase](docs/supabase/schema.md)
+- [Протокол Draft/Apply/Cancel](docs/draft-protocol.md)
+
+## Статус
+
+Репозиторий создаётся для фиксации требований и дальнейшей архитектуры/реализации.
