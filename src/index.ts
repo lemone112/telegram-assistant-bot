@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { composioExecute } from "./composio";
 
 type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -10,7 +11,6 @@ type Env = {
   SUPABASE_SCHEMA?: string;
   PAUSE_REMINDER_DAYS?: string;
   BOT_ALLOWED_TELEGRAM_USER_IDS?: string;
-  LINEAR_TEAM_ID?: string;
 };
 
 type TelegramUpdate = {
@@ -125,6 +125,88 @@ async function createDraft(env: Env, draft: Omit<DraftRow, "status"> & { status?
   if (error) throw new Error(`Supabase insert draft failed: ${error.message}`);
 }
 
+async function getSettings(env: Env, key: string): Promise<any> {
+  const client = supa(env);
+  const schema = env.SUPABASE_SCHEMA ?? "bot";
+  const { data, error } = await client.schema(schema).from("settings").select("value").eq("key", key).limit(1);
+  if (error) throw new Error(`Supabase settings read failed: ${error.message}`);
+  return (data?.[0] as any)?.value;
+}
+
+async function audit(env: Env, actorId: number | null, action: string, status: "success" | "failure", target?: any, errorMsg?: string) {
+  const client = supa(env);
+  const schema = env.SUPABASE_SCHEMA ?? "bot";
+  const { error } = await client.schema(schema).from("audit_log").insert({
+    actor_telegram_user_id: actorId ? String(actorId) : null,
+    action,
+    target: target ?? null,
+    status,
+    error: errorMsg ?? null,
+    created_at: nowIso(),
+  } as any);
+  if (error) {
+    // don't fail the request because of audit failure
+    console.log("audit insert failed", error.message);
+  }
+}
+
+async function resolveStageName(env: Env, stageInput: string): Promise<{ stage_key: string; stage_name: string } | null> {
+  const client = supa(env);
+  const schema = env.SUPABASE_SCHEMA ?? "bot";
+  const normalized = stageInput.trim().toLowerCase();
+
+  // 1) alias exact match
+  {
+    const { data, error } = await client.schema(schema).from("deal_stage_aliases").select("stage_key").eq("alias", normalized).limit(1);
+    if (error) throw new Error(`Supabase stage alias lookup failed: ${error.message}`);
+    const stageKey = (data?.[0] as any)?.stage_key as string | undefined;
+    if (stageKey) {
+      const { data: s, error: e2 } = await client.schema(schema).from("deal_stages").select("stage_key,stage_name").eq("stage_key", stageKey).limit(1);
+      if (e2) throw new Error(`Supabase stage lookup failed: ${e2.message}`);
+      const row = s?.[0] as any;
+      if (row?.stage_key && row?.stage_name) return { stage_key: row.stage_key, stage_name: row.stage_name };
+    }
+  }
+
+  // 2) stage_name exact match (case-insensitive)
+  {
+    const { data, error } = await client.schema(schema).from("deal_stages").select("stage_key,stage_name").ilike("stage_name", normalized).limit(1);
+    if (error) throw new Error(`Supabase stage name lookup failed: ${error.message}`);
+    const row = data?.[0] as any;
+    if (row?.stage_key && row?.stage_name) return { stage_key: row.stage_key, stage_name: row.stage_name };
+  }
+
+  return null;
+}
+
+async function applyDealStage(env: Env, actorId: number, draftId: string, dealId: string, stageInput: string) {
+  const composioSettings = await getSettings(env, "composio");
+  const attioConn = composioSettings?.attio_connection_id as string | null;
+  if (!attioConn) throw new Error("Composio Attio connection id is not configured in bot.settings (key=composio)");
+
+  const resolved = await resolveStageName(env, stageInput);
+  if (!resolved) throw new Error(`Unknown stage: ${stageInput}`);
+
+  await audit(env, actorId, "deal.stage.update.requested", "success", { draftId, dealId, stage: resolved });
+
+  // Execute Attio update via Composio
+  await composioExecute(env, {
+    tool_slug: "ATTIO_UPDATE_RECORD",
+    connected_account_id: attioConn,
+    arguments: {
+      object_type: "deals",
+      record_id: dealId,
+      values: {
+        stage: [resolved.stage_name],
+      },
+    },
+  });
+
+  await audit(env, actorId, "deal.stage.update", "success", { draftId, dealId, stage: resolved });
+
+  return resolved;
+}
+
 async function handleCommand(env: Env, chatId: number, fromId: number, cmd: string, args: string) {
   switch (cmd) {
     case "start":
@@ -133,8 +215,6 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
         chat_id: chatId,
         text:
           "Команды:\n" +
-          "/deal find <text>\n" +
-          "/deal view <deal_id_or_text>\n" +
           "/deal stage <deal_id> <stage>\n" +
           "/deal won <deal_id>\n\n" +
           "Все изменения выполняются только через Draft → Применить.",
@@ -145,7 +225,7 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
     case "deal": {
       const [sub, ...rest] = args.split(/\s+/).filter(Boolean);
       if (!sub) {
-        await tgCall(env, "sendMessage", { chat_id: chatId, text: "Используй: /deal find|view|stage|won ..." });
+        await tgCall(env, "sendMessage", { chat_id: chatId, text: "Используй: /deal stage|won ..." });
         return;
       }
 
@@ -194,7 +274,6 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
             type: "deal.won",
             attio_deal_id: dealId,
             target_stage_key: "won",
-            linear_team_id: env.LINEAR_TEAM_ID,
             created_at: nowIso(),
           },
         });
@@ -208,10 +287,7 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
         return;
       }
 
-      await tgCall(env, "sendMessage", {
-        chat_id: chatId,
-        text: "Пока реализовано: /deal stage, /deal won (Draft). Apply/Cancel + executor — следующий коммит.",
-      });
+      await tgCall(env, "sendMessage", { chat_id: chatId, text: "Пока реализовано: /deal stage, /deal won." });
       return;
     }
 
@@ -232,12 +308,75 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
     return;
   }
 
-  // TODO: implement apply/cancel by updating bot.drafts and executing actions.
-  await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: `OK: ${action}` });
-  await tgCall(env, "sendMessage", {
-    chat_id: chatId,
-    text: `Пока только каркас. Следующий коммит добавит Apply/Cancel и исполнение actions. Draft: ${draftId}`,
-  });
+  const client = supa(env);
+  const schema = env.SUPABASE_SCHEMA ?? "bot";
+
+  // fetch draft
+  const { data: drafts, error } = await client.schema(schema).from("drafts").select("draft_id,chat_id,author_telegram_user_id,status,payload").eq("draft_id", draftId).limit(1);
+  if (error) throw new Error(`Supabase draft fetch failed: ${error.message}`);
+  const draft = drafts?.[0] as any as DraftRow | undefined;
+  if (!draft) {
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Draft not found" });
+    return;
+  }
+
+  // only author can apply/cancel
+  if (String(cb.from.id) !== String(draft.author_telegram_user_id)) {
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Only draft author can do this" });
+    return;
+  }
+
+  if (action === "cancel") {
+    const { error: e2 } = await client.schema(schema).from("drafts").update({ status: "CANCELLED" } as any).eq("draft_id", draftId);
+    if (e2) throw new Error(`Supabase cancel failed: ${e2.message}`);
+    await audit(env, cb.from.id, "draft.cancel", "success", { draftId });
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Cancelled" });
+    await tgCall(env, "sendMessage", { chat_id: chatId, text: `Draft отменён: ${draftId}` });
+    return;
+  }
+
+  if (action !== "apply") {
+    await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Unknown action" });
+    return;
+  }
+
+  // idempotency on callback
+  const idemKey = `${draftId}:${cb.id}`;
+  {
+    const { error: idemErr } = await client.schema(schema).from("idempotency_keys").insert({ key: idemKey, draft_id: draftId } as any);
+    if (idemErr) {
+      // conflict means already applied
+      await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Already applied" });
+      return;
+    }
+  }
+
+  await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Applying..." });
+
+  try {
+    const payload: any = (draft as any).payload;
+
+    if (payload?.type === "deal.stage") {
+      const dealId = payload.attio_deal_id as string;
+      const stageInput = payload.stage_input as string;
+      const resolved = await applyDealStage(env, cb.from.id, draftId, dealId, stageInput);
+
+      await client.schema(schema).from("drafts").update({ status: "APPLIED" } as any).eq("draft_id", draftId);
+      await audit(env, cb.from.id, "draft.apply", "success", { draftId, type: payload.type });
+
+      await tgCall(env, "sendMessage", {
+        chat_id: chatId,
+        text: `Готово. Сделка ${dealId} переведена в стадию: ${resolved.stage_name}`,
+      });
+      return;
+    }
+
+    await tgCall(env, "sendMessage", { chat_id: chatId, text: `Apply для типа ${payload?.type ?? "unknown"} пока не реализован.` });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await audit(env, cb.from.id, "draft.apply", "failure", { draftId }, msg);
+    await tgCall(env, "sendMessage", { chat_id: chatId, text: `Ошибка Apply: ${msg}` });
+  }
 }
 
 export default {
