@@ -24,7 +24,7 @@ Every PR must be reviewed with special attention to **Codex** review comments.
 - **LightRAG knowledge DB** (external server)
   - DB requirements: `docs/lightrag-db-requirements.md`
   - Must provide: grounded citations, entity linking, and server-side ACL filtering.
-  - Integration is planned under Iteration 5 (Reports), but LightRAG readiness is a prerequisite.
+  - Integration is planned under Iteration 5 (Reports) and Iteration 9+ (RAG features), but LightRAG readiness is a prerequisite.
 
 ---
 
@@ -230,7 +230,7 @@ These flows define “the bot is ready”. We implement them progressively and m
 ### CSV export format (v1)
 
 - Encoding: UTF-8
-- Delimiter: comma (`,`)
+- Delimiter: comma (`,`) 
 - Max rows: 5,000 (beyond → ask user to narrow filter)
 - File naming: `report_<type>_<YYYY-MM-DD>.csv`
 
@@ -325,10 +325,223 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ---
 
-# Post-v1 backlog (explicit)
+# Iterations (post-v1 → GA)
 
-- Bulk import `/client-mass`
-- Reminders
-- Timezone `/tz`
-- Linear Project creation + stronger deal→project mapping (if tool support confirmed)
+> These iterations take the bot from a stable v1 to a full product launch (GA).
+
+## Iteration 9 (P0) — LightRAG integration (read-only, grounded, ACL)
+
+**Goal:** connect LightRAG as bot memory with grounded answers and server-side ACL.
+
+### Deliverables
+
+- LightRAG client integration:
+  - `brief` (by deal/company) with citations
+  - `ask` Q&A with citations
+- Grounded answer rule:
+  - if citations are missing → return "not found / insufficient evidence"
+- ACL propagation:
+  - bot sends ACL context (team/user/tenant)
+  - LightRAG filters server-side
+- Entity linking workflow:
+  - ambiguity → Pick list
+  - user pick persists as a confirmed mapping
+
+### DoD
+
+- “brief по ACME (14 дней)” returns summary + 3–5 citations.
+- “что обещали по срокам?” returns only statements with citations.
+- No cross-tenant leakage.
+
+---
+
+## Iteration 10 (P0) — Entity graph navigator (single pane of glass)
+
+**Goal:** `/everything <deal|company>` shows a navigable graph across Attio/Linear/Chatwoot/LightRAG.
+
+### Deliverables
+
+- Unified view:
+  - Attio entity card
+  - Linked Linear issues/projects
+  - Linked Chatwoot conversations
+  - LightRAG brief block
+- UX: paginated sections + pick.
+
+### DoD
+
+- A user can reach any linked object in ≤ 3 clicks from the hub.
+
+---
+
+## Iteration 11 (P0) — Action items extraction (Chatwoot → Draft tasks)
+
+**Goal:** convert conversation history into a Draft of Linear tasks, safely.
+
+### Deliverables
+
+- Extract action items from a conversation/time range.
+- Draft shows:
+  - tasks + citations to exact messages
+  - bulk warning and extra confirmation when >=5
+- Dedupe to prevent repeated task creation.
+
+### DoD
+
+- Apply creates tasks exactly once.
+- Re-run produces the same tasks (or explains why changed) with citations.
+
+---
+
+## Iteration 12 (P1) — Advanced planner + clarification policy + Draft edit
+
+**Goal:** handle multi-step multi-domain requests with bounded clarification.
+
+### Deliverables
+
+- Clarification policy:
+  - max 2 questions at a time
+  - max 3 rounds then fallback to menu/commands
+- Mixed plans (Attio + Linear in one request), still Draft-gated.
+- Draft Edit for common parameters (assignee, due, priority, target).
+
+### DoD
+
+- 80% of common requests complete without forcing slash commands.
+
+---
+
+## Iteration 13 (P1) — Reminders + scheduled digests (opt-in)
+
+**Goal:** proactive assistant without spam.
+
+### Deliverables
+
+- Opt-in reminders for paused deals and commitments (with Draft-confirmed subscription).
+- Weekly digest for selected deals/clients.
+- Quiet hours + timezone aware scheduling.
+
+### DoD
+
+- No reminders are sent without user opt-in and clear settings.
+
+---
+
+## Iteration 14 (P1) — Settings UX (CryptoBot-style)
+
+**Goal:** reduce friction via per-user defaults.
+
+### Deliverables
+
+- `/settings` menu:
+  - timezone
+  - default Linear team/project/state
+  - report preferences
+- Persist settings in DB.
+
+### DoD
+
+- A user can fully configure without manual env/DB edits.
+
+---
+
+## Iteration 15 (P1) — Bulk import `/client-mass` (optional)
+
+**Goal:** safe bulk create/update.
+
+### Deliverables
+
+- Bulk parsing + preview + per-item validation.
+- Apply batching + idempotency + audit.
+
+### DoD
+
+- Bulk cannot run without explicit confirmation and preview.
+
+---
+
+## Iteration 16 (P0) — Security hardening & compliance
+
+**Goal:** production-grade safety for a bot that handles conversations.
+
+### Deliverables
+
+- Secrets and PII handling policy.
+- Audit trails.
+- Retention policy + delete flows.
+
+### DoD
+
+- Internal security checklist passes.
+
+---
+
+## Iteration 17 (P0) — Observability, SLO, incident playbooks
+
+**Goal:** fast diagnosis and safe degradation.
+
+### Deliverables
+
+- Metrics for latency/error rates by stage (planner/lightRAG/composio/db).
+- Incident playbooks (LightRAG down / Supabase down / Composio degraded).
+- Feature flags to disable modules.
+
+### DoD
+
+- Every outage mode has a clear user message and admin path.
+
+---
+
+## Iteration 18 (P1) — Release engineering (staging, canary, migrations discipline)
+
+**Goal:** release without breaking users.
+
+### Deliverables
+
+- dev/staging/prod environments.
+- Canary rollout.
+- Migration workflow (expand/contract) + rollback.
+
+### DoD
+
+- Deploys are repeatable, reversible, and documented.
+
+---
+
+## Iteration 19 (P0) — QA automation & regression gates
+
+**Goal:** never break North Star flows.
+
+### Deliverables
+
+- Scripted acceptance runs for NS1–NS5 + RAG flows.
+- Golden snapshots for messages.
+- CI gate to block merges on regressions.
+
+### DoD
+
+- PRs that break NS flows cannot be merged.
+
+---
+
+## Iteration 20 (P0) — GA launch (onboarding + docs + support loop)
+
+**Goal:** ship a product that people can start using in 5 minutes.
+
+### Deliverables
+
+- Onboarding flow (`/start`) that validates integrations.
+- User guide + FAQ.
+- "Report a problem" loop (creates an internal issue/ticket via Draft).
+
+### DoD
+
+- New user completes 1 query and 1 mutation successfully within 5 minutes.
+
+---
+
+# Post-GA backlog (explicit)
+
 - Undo (only where safely reversible)
+- Deeper analytics dashboards
+- Additional connectors
