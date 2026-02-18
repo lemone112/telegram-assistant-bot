@@ -1,143 +1,103 @@
 # Iterations roadmap (authoritative)
 
-This document is the **authoritative execution plan** for this repository. It is intentionally written as an engineering backlog with clear priorities.
+This document is the **authoritative execution plan** for this repository.
 
-## Guiding principles
+## Preconditions (planning gate)
 
-- **DB contract is canonical**: see `docs/supabase/db-contract.md`.
-- All runtime tables live in schema `bot`.
-- Destructive resets are DEV-only.
-- Every external side-effect MUST be gated by **Draft → Apply** and **idempotency**.
-- Prefer small PRs that keep code + migrations aligned.
+We DO NOT start implementation of an iteration until the corresponding spec docs exist and are reviewed.
 
-## Current state (already shipped)
+Required planning docs:
+- `docs/v1-scope.md`
+- `docs/planner-contract.md`
+- `docs/ux-flows.md`
+- `docs/reports-spec.md`
 
-### Draft engine
+---
 
-- Drafts stored in `bot.drafts` (PK `id uuid`).
-- Draft author enforced via FK `bot.drafts.telegram_user_id -> bot.telegram_users.id`.
-- Idempotency gate uses `bot.idempotency_keys` with keys like `tg:callback:<callback_query_id>`.
-- Apply observability stored in `bot.draft_apply_attempts`.
+## Iteration 0 — Planning (BLOCKER)
 
-### Admin / ops
+- [ ] Write and approve v1 scope: `docs/v1-scope.md`
+- [ ] Write and approve Planner contract: `docs/planner-contract.md`
+- [ ] Write and approve UX flows: `docs/ux-flows.md`
+- [ ] Write and approve reports spec: `docs/reports-spec.md`
 
-- `/admin status`
-- `/admin composio show`
-- `/admin composio attio <connected_account_id>` (merge-patch)
-- `/admin composio linear <connected_account_id>`
-
-> Note: we intentionally do NOT auto-pick a Linear team in runtime. `LINEAR_TEAM_ID` must be explicitly configured.
+**Definition of Done:** all docs above exist, cross-linked from README and this roadmap.
 
 ---
 
 ## Iteration P0.1 — UX/UI foundation (CryptoBot-style)
 
-**Goal:** consistent Telegram UX with inline keyboards, pagination, and a single interaction model.
+**Depends on:** `docs/ux.md`, `docs/ux-flows.md`
 
-- [ ] Implement message renderer (Card/List/Draft/Result) with consistent formatting.
-- [ ] Implement callback payload schema `v1|...` (versioned) + parser.
+- [ ] Implement message renderer (Card/List/Draft/Result) with strict length limits.
+- [ ] Implement callback payload schema `v1|...` + parser + signature/validation.
 - [ ] Add pagination helper for list outputs (Prev/Next + pick).
 - [ ] Add Draft expiry handling (`expires_at`) + “Rebuild draft” button.
-- [ ] Add `/help` with examples for free-form and slash commands.
+- [ ] Add `/help` with examples.
 
-Docs:
-- [ ] Add `docs/ux.md` (this repo-level spec).
-
-## Iteration P0.2 — Router: free-form text + voice → Composio MCP plan
-
-**Goal:** any message becomes a structured plan routed to Attio/Linear tools.
-
-- [ ] Add STT pipeline for voice → text (provider TBD) + store transcript.
-- [ ] Define planner output schema: `intent (query|mutate)`, `domain`, `actions[]`, `needs_clarification[]`.
-- [ ] Implement clarification loop (persist pending questions in DB, buttons for common answers).
-- [ ] Add safety policy:
-  - Always Draft-gate mutations
-  - Read-only queries may auto-run, but still logged
-  - Bulk operations require additional confirmation (count threshold)
-
-## Iteration P0.3 — `/deal stage` production-grade (Attio)
-
-**Goal:** stable Draft → Apply for stage changes in Attio.
-
-- [x] DB-first drafts using `bot.drafts.id` (uuid)
-- [x] Author enforcement via `bot.telegram_users` FK
-- [x] Idempotency via `bot.idempotency_keys`
-- [x] Apply observability via `bot.draft_apply_attempts`
-- [ ] Improve user-facing preview (include resolved `stage_name` before Apply)
-- [ ] Add explicit Draft expiry handling (`expires_at`) + UX messaging
-- [ ] Add better error taxonomy (Attio/Composio/Supabase)
-
-## Iteration P0.4 — Admin hardening
-
-**Goal:** no manual DB editing required for day-to-day ops.
-
-- [x] `/admin status`
-- [x] `/admin composio show`
-- [x] `/admin composio attio <id>` (merge-patch)
-- [x] `/admin composio linear <id>`
-- [ ] Add `/admin env check` (validate required env vars and print what’s missing)
-- [ ] Add `/admin linear teams` (allowlist) to list teams and choose `LINEAR_TEAM_ID`
-
-## Iteration P1.1 — Queries & reports (Attio + Linear)
-
-**Goal:** support read-only questions with the same UX quality.
-
-- [ ] `/report clients weekly` (Attio): summary + top changes
-- [ ] `/report pipeline` (Attio): counts by stage + deltas
-- [ ] `/report projects <deal>` (Linear): project/issues grouped by state
-- [ ] Report pagination + export (CSV) + refresh button
-- [ ] Caching strategy in DB (short TTL) for report queries
-
-## Iteration P1.2 — `/deal won` Apply (Linear kickoff)
-
-**Goal:** stage=won triggers Linear kickoff.
-
-Phase 3A (MVP):
-- [x] Enforce `LINEAR_TEAM_ID` from env with friendly error if missing
-- [ ] Create 12 kickoff issues from template (idempotent)
-
-Phase 3B (production-quality):
-- [ ] Create a Linear **Project** (name rule: `Company — Deal name`)
-- [ ] Persist mapping in `bot.deal_linear_links` (Attio deal → Linear project)
-- [ ] Create 12 kickoff issues **inside the project**
-- [ ] Backlink to Attio (NOTE preferred as default)
-
-## Iteration P1.3 — Visibility commands
-
-**Goal:** make the bot useful without context switching.
-
-- [ ] `/deal find <text>` (Attio query)
-- [ ] `/deal view <id>`
-- [ ] `/pipeline`
-- [ ] `/linear issue <key>` view (basic)
-
-## Iteration P2.1 — Reminders
-
-- [ ] On stage change to `paused`, schedule reminder in `bot.reminders` (due_at = now + `PAUSE_REMINDER_DAYS`)
-- [ ] Scheduled job to send reminders and mark `sent/cancelled`
-- [ ] `/admin reminders` to inspect queue
-
-## Iteration P2.2 — `/task` end-to-end
-
-- [ ] `/task <text>` Draft → Apply
-- [ ] Project/state selection rules
-- [ ] Optionally link issue back to deal/project
-
-## Iteration P2.3 — Bulk import (`/client-mass`)
-
-- [ ] Parse bulk blocks into `bot.draft_bulk_items`
-- [ ] Preview + per-item validation
-- [ ] Apply with batching + idempotency + audit
-
-## Iteration P2.4 — Timezone + UX polish
-
-- [ ] `/tz` per user
-- [ ] Better message formatting, retries, and clearer UX
+**Critique / pitfalls:**
+- Without strict formatting limits Telegram will truncate and UX will degrade.
+- Without Pick list, ambiguity will cause wrong client selection (fatal).
 
 ---
 
-## Risks / watchlist
+## Iteration P0.2 — Router: text + voice → Planner → Draft/Query
 
-- PostgREST exposure: ensure `bot` is in PostgREST `db_schema`.
-- Schema drift: keep code and baseline migrations aligned.
-- Idempotency correctness: keys must be deterministic and unique per side-effect.
+**Depends on:** `docs/planner-contract.md`
+
+- [ ] Voice STT pipeline + transcript confirm/edit.
+- [ ] Implement Plan validator and risk gates (ambiguous/bulk/missing).
+- [ ] Clarification loop with buttons.
+- [ ] Deterministic idempotency keys per side-effect.
+
+**Critique / pitfalls:**
+- If Planner can emit tool calls directly without validation → unsafe.
+- If query/mutate distinction is weak → accidental writes.
+
+---
+
+## Iteration P0.3 — Attio: `/deal stage` production-grade
+
+- [ ] Preview with resolved `stage_name` (before Apply)
+- [ ] Expiry UX
+- [ ] Error taxonomy + retries
+
+---
+
+## Iteration P0.4 — Admin hardening
+
+- [ ] `/admin env check`
+- [ ] `/admin linear teams`
+
+---
+
+## Iteration P1.1 — Reports (v1)
+
+**Depends on:** `docs/reports-spec.md`
+
+- [ ] Pipeline report (Attio) + export CSV + refresh
+- [ ] Deal/client status (Attio)
+- [ ] Linear project/issues status by deal
+- [ ] Caching (TTL)
+
+---
+
+## Iteration P1.2 — Linear: `/deal won` kickoff
+
+- [ ] Create 12 kickoff issues from template (idempotent)
+- [ ] Optional: Project + mapping + backlink (if tool support confirmed)
+
+---
+
+## Iteration P1.3 — Visibility commands
+
+- [ ] `/deal find`, `/deal view`, `/pipeline`
+
+---
+
+## Iteration P2 — Production readiness
+
+- [ ] Rate limit handling + retries + backoff
+- [ ] Audit commands and logs
+- [ ] Test matrix (happy/edge/failure)
+
