@@ -1,26 +1,19 @@
-type Env = {
-  COMPOSIO_API_KEY: string;
-};
-
-export type ComposioToolExecuteRequest = {
+type ComposioExecuteRequest = {
   tool_slug: string;
-  arguments: Record<string, any>;
-  // optional routing to the right connection (implementation dependent)
+  arguments: Record<string, unknown>;
   connected_account_id?: string;
 };
 
-export async function composioExecute(env: Env, req: ComposioToolExecuteRequest) {
-  // NOTE:
-  // This is a minimal wrapper. The exact Composio HTTP endpoint may differ depending on your Composio deployment.
-  // We keep this isolated so we can adjust without touching business logic.
-  //
-  // Expected behavior:
-  // - POST to Composio "execute" endpoint with tool_slug + arguments
-  // - returns JSON with { successful, data, error }
+type Env = {
+  COMPOSIO_API_KEY: string;
+  COMPOSIO_BASE_URL?: string;
+};
 
-  const endpoint = "https://backend.composio.dev/api/v2/actions/execute";
+export async function composioExecute(env: Env, req: ComposioExecuteRequest): Promise<any> {
+  const base = (env.COMPOSIO_BASE_URL ?? "https://backend.composio.dev").replace(/\/$/, "");
+  const url = `${base}/api/v2/actions/execute`;
 
-  const res = await fetch(endpoint, {
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -28,14 +21,14 @@ export async function composioExecute(env: Env, req: ComposioToolExecuteRequest)
     },
     body: JSON.stringify({
       action: req.tool_slug,
-      params: req.arguments,
-      connected_account_id: req.connected_account_id,
+      input: req.arguments,
+      connectedAccountId: req.connected_account_id,
     }),
   });
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(`Composio HTTP ${res.status}: ${JSON.stringify(data)}`);
+    throw new Error(`Composio execute failed: ${res.status} ${JSON.stringify(data)}`);
   }
   return data;
 }
