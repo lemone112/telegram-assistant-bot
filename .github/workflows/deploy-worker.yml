@@ -20,14 +20,11 @@ jobs:
           cache: npm
 
       - name: Install deps
-        run: npm ci
+        run: npm install
 
       - name: Typecheck
         run: npm run typecheck
 
-      # IMPORTANT:
-      # - Wrangler reads these env vars at deploy time and publishes them as Worker bindings.
-      # - Keep secrets in GitHub Secrets; non-secrets in GitHub Variables.
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
