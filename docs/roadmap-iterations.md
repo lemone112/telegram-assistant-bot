@@ -8,8 +8,45 @@ This document is the **authoritative execution plan** for this repository.
 - Every iteration has:
   - **North Star flows** (acceptance scenarios)
   - **Definition of Done** (DoD)
-  - Explicit **dependencies** and **pitfalls**
+  - explicit **dependencies** and **pitfalls**
 - We prefer small PRs; however, we do not split so hard that we ship half-features.
+
+---
+
+## Global product rules (cross-cutting, non-negotiable)
+
+These rules apply to **every iteration** and must never be violated.
+
+### Safety & correctness
+
+- **No side-effects without Draft → Apply** (mutations always gated).
+- **Idempotency is ledger-backed**: per side-effect key → stored result → repeat returns same result.
+- **Allowlist routing**: tool selection is constrained by explicit allowlists/denylists; planner is not trusted.
+- **Bulk gate**: any plan with **>= 5** operations must require extra confirmation.
+
+### Grounded knowledge (LightRAG)
+
+- Any answer based on historical knowledge MUST be **grounded with citations** (links/snippets).
+- If citations are missing → respond with **"not found / insufficient evidence"**.
+
+### Entity linking
+
+- Never auto-guess an entity when there are multiple plausible candidates.
+- Ambiguity must trigger a **Pick list**.
+- Confirmed picks must persist as stable mappings.
+
+### ACL / privacy
+
+- Access control must be enforced **server-side** for LightRAG.
+- The bot must not leak Chatwoot/CRM data across roles/tenants.
+
+### UX
+
+- No wall-of-text.
+- All lists are paginated (<= 8 items/page).
+- Buttons order: positive → neutral → negative.
+
+---
 
 ## Code review policy (MANDATORY)
 
@@ -19,12 +56,20 @@ Every PR must be reviewed with special attention to **Codex** review comments.
 - Treat Codex findings as a checklist: either fix the code or explicitly justify why not.
 - Do not merge when Codex flags: idempotency gaps, unsafe tool routing, missing allowlists, or retry/rate-limit issues.
 
+---
+
 ## External dependencies (blocking contracts)
 
-- **LightRAG knowledge DB** (external server)
-  - DB requirements: `docs/lightrag-db-requirements.md`
-  - Must provide: grounded citations, entity linking, and server-side ACL filtering.
-  - Integration is planned under Iteration 5 (Reports) and Iteration 9+ (RAG features), but LightRAG readiness is a prerequisite.
+### LightRAG knowledge DB (external server)
+
+- DB requirements: `docs/lightrag-db-requirements.md`
+- Must provide: grounded citations, entity linking primitives, server-side ACL filtering.
+- If LightRAG is down: bot must degrade safely with a clear message.
+
+### Attio / Linear / Chatwoot contracts
+
+- Links to source objects must be stable and shown in UI.
+- Rate limits and 5xx must be handled by retry/backoff wrappers.
 
 ---
 
@@ -46,39 +91,24 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## NS1 — Voice → transcript confirm → Attio stage change (Draft-gated)
 
-1. User sends a voice message: “Переведи сделку ACME в paused”.
-2. Bot replies with Transcript + buttons: `✅ Use transcript` `✏️ Edit text` `❌ Cancel`.
-3. After confirm, bot shows Draft with resolved deal + target stage name.
-4. User taps `✅ Apply`.
-5. Bot replies `✅ Applied` with Attio link.
+- Voice → transcript confirm/edit → Draft → Apply → Attio updated
+- Must hold: no duplicates, ambiguity triggers Pick
 
-**Must hold:** no duplicates on double-click / retries; ambiguity triggers Pick.
+## NS2 — Text → ambiguous deal → Pick list → Card
 
-## NS2 — Text → ambiguous deal → pick list → card
-
-1. User: “покажи сделку atlas”.
-2. Bot shows paginated list (<=8 items) with `Pick 1..8`.
-3. User picks.
-4. Bot shows Deal card and links.
+- Search returns paginated list → user picks → Card shown
 
 ## NS3 — Deal won kickoff → Linear 12 issues (no duplicates)
 
-1. User: “Сделка ACME выиграна, создай kickoff”.
-2. Bot shows Draft: create 12 issues (risk flag) + shows team + naming.
-3. Apply creates issues.
-4. Second Apply (same draft or retried callback) does NOT create duplicates; returns existing results.
+- Draft shows 12 creates + bulk warning → Apply creates exactly once
 
 ## NS4 — Pipeline report → refresh → export CSV
 
-1. User: “отчет по пайплайну”.
-2. Bot shows report card, `🔁 Refresh` `📄 Export CSV`.
-3. Export sends CSV file.
+- Report card → refresh → export file
 
 ## NS5 — Status by deal → Linear issues grouped by state
 
-1. User: “статус проекта по сделке ACME”.
-2. Bot resolves deal and mapping OR asks to pick.
-3. Bot shows grouped issues (To Do / In Progress / Done), paginated.
+- Resolve mapping (or pick) → show grouped issues → paginated
 
 ---
 
@@ -86,7 +116,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 1 (P0) — Safety backbone + deterministic execution model
 
-**Goal:** make it *impossible* to accidentally write without Draft and *impossible* to duplicate side-effects.
+**Why this exists:** without it we will create duplicates, leak writes through queries, and fail under retries.
+
+### Dependencies
+
+- Supabase schema supports drafts/idempotency/apply attempts.
 
 ### Implementation tracker (GitHub Issues)
 
@@ -97,211 +131,203 @@ These flows define “the bot is ready”. We implement them progressively and m
 - #15 Bulk risk gate + extra confirmation
 - #16 Per-action observability
 
-### Deliverables
+### Deliverables (detailed)
 
-- Idempotency ledger (key → status → result payload → external ids) for every side-effect.
-- Allowlists:
-  - read-only tool slugs (safe auto-run)
-  - mutate tool slugs (only these allowed)
-  - denylist (explicitly blocked)
-- Unified retry/backoff wrapper for external calls (429/5xx) with user-friendly errors.
-- Error taxonomy:
-  - `USER_INPUT` (missing/ambiguous)
-  - `CONFIG` (missing env / missing connection)
-  - `UPSTREAM` (Attio/Linear/Composio)
-  - `DB`
+- **Idempotency ledger**
+  - key format standards for:
+    - Telegram callbacks
+    - side-effect operations (per entity)
+  - store: status, result payload, external ids, error, timestamps
+- **Tool policy**
+  - read-only allowlist
+  - mutate allowlist
+  - denylist
+  - rule: unknown tool slugs are blocked
+- **Retry policy**
+  - retry on 429/5xx/network
+  - deadlines and max attempts
+  - safe integration with idempotency
+- **Error taxonomy + rendering**
+  - USER_INPUT / CONFIG / UPSTREAM / DB
+  - short user message + next step
+- **Bulk gate**
+  - >=5 ops triggers extra confirmation
 
-### North Star flows covered
+### Acceptance tests
 
-- Partial enablement for NS1/NS3 (idempotency + gates).
+- Double-click Apply on same Draft → only one side-effect, second returns stored result.
+- Simulated 429 from upstream → retries, no duplicates.
+- Planner suggests unknown tool → blocked with CONFIG/SECURITY message.
 
 ### DoD
 
-- Any mutation request without Draft is blocked.
-- Duplicate callback executions return the *same* result (no re-run).
-- Logs record per-action outcomes.
-
-### Pitfalls
-
-- Relying on Telegram callback id only is insufficient; must also protect per-side-effect operations.
+- All mutations are gated and ledger-backed.
+- Repeat executions are safe.
 
 ---
 
-## Iteration 2 (P0) — CryptoBot UX system: renderer + buttons + home hub
+## Iteration 2 (P0) — CryptoBot UX system (renderer + buttons + hub)
 
-**Goal:** ship a consistent UX system that users can operate without typing commands.
+### Dependencies
 
-### Deliverables
+- Iteration 1 safety backbone (callbacks must be safe).
 
-- Message renderer for:
-  - Card
-  - List (pagination)
-  - Draft (steps + risk flags)
-  - Result
-  - Error
-- Inline keyboard system + callback protocol `v1|kind|...`.
-- Pagination sessions (Prev/Next + Pick 1..8) with ownership and TTL.
-- Draft expiry UX (`expires_at`) + `Rebuild draft`.
-- **Home/Hub** (CryptoBot behavior):
-  - `/menu` shows a persistent hub message (can be pinned) with buttons:
-    - `📊 Reports`
-    - `🤝 Deals`
-    - `🧩 Tasks`
-    - `⚙️ Settings`
-    - `❓ Help`
-  - Hub buttons open sub-menus (lists / report choices).
+### Deliverables (detailed)
 
-### North Star flows covered
+- Rendering components:
+  - Card, List, Draft, Result, Error
+- Pagination sessions:
+  - page cursor, TTL, ownership
+- Callback protocol:
+  - versioned payloads
+  - validation
+- `/menu` hub:
+  - Reports / Deals / Tasks / Settings / Help
+  - sub-menus
 
-- NS2 fully (Pick list + Card UX)
+### Acceptance tests
+
+- NS2 fully passes using List→Pick→Card.
+- Pagination works for >8 items and does not leak other user's sessions.
 
 ### DoD
 
-- 12+ golden snapshot examples maintained (docs or tests).
-- All lists are paginated, no wall-of-text.
-
-### Pitfalls
-
-- Without strict limits, Telegram truncation will break UI.
+- 12+ golden snapshots
+- no truncation in typical messages
 
 ---
 
 ## Iteration 3 (P0) — Voice pipeline (STT) with transcript confirmation
 
+### Dependencies
+
+- Iteration 2 UX components (transcript UI).
+
 ### Voice limits (v1)
 
 - Max duration: **120s**
 - Max file size: **20 MB**
-- Language: RU/EN autodetect (best-effort)
-- Low-confidence threshold: **< 0.70** → require explicit user confirm/edit
+- RU/EN autodetect (best-effort)
+- Low-confidence threshold: **< 0.70** → require confirm/edit
 
-**Goal:** voice is first-class and reliable.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Download voice file → STT → transcript.
+- Voice download + STT
 - Transcript UX:
-  - short transcript preview
-  - buttons: `Use transcript`, `Edit text`, `Cancel`
-- Degradation policy:
-  - if STT fails → ask user to send text
-  - if confidence low → ask to confirm/edit
-  - limits (duration/size) with clear messaging
+  - Use transcript / Edit text / Cancel
+- Degradation:
+  - STT down → ask for text
+  - low confidence → force confirm/edit
 
-### North Star flows covered
+### Acceptance tests
 
-- NS1 step 1–2
+- NS1 steps 1–2 pass.
 
 ### DoD
 
-- Voice always produces *either* transcript flow *or* a clear fallback.
+- Voice always results in transcript flow or safe fallback.
 
 ---
 
-## Iteration 4 (P0) — Attio core: deal resolution + `/deal stage` production-grade
+## Iteration 4 (P0) — Attio core (deal resolution + `/deal stage` reference quality)
 
-**Goal:** one mutation and one query become “reference quality”.
+### Dependencies
 
-### Deliverables
+- Iteration 1 (idempotency) + Iteration 2 (pick list)
 
-- Deal resolution engine:
+### Deliverables (detailed)
+
+- Deal resolver:
   - search by text
-  - ambiguity → Pick list (required)
-  - cache last selected deal per user
+  - ambiguous → Pick list
+  - cache last selected deal per user (TTL)
 - `/deal stage`:
-  - preview shows resolved stage name before Apply
-  - no-op detection (already in stage)
-  - clean error messages
+  - preview resolves stage name
+  - no-op detection
+  - Apply uses idempotency per (deal_id, target_stage)
 
-### North Star flows covered
+### Acceptance tests
 
-- NS1 fully (with voice already done)
-- NS2 (deal card)
+- NS1 fully passes end-to-end.
 
 ### DoD
 
-- Apply updates exactly once.
-- User always sees *what will change* before Apply.
+- Stage changes apply exactly once.
 
 ---
 
 ## Iteration 5 (P1) — Reports v1 (Attio + Linear) with export/caching
 
+### Dependencies
+
+- Iteration 2 (hub) + Iteration 1 (safe execution)
+
 ### CSV export format (v1)
 
 - Encoding: UTF-8
 - Delimiter: comma (`,`) 
-- Max rows: 5,000 (beyond → ask user to narrow filter)
-- File naming: `report_<type>_<YYYY-MM-DD>.csv`
-
-**Goal:** high-utility read-only experiences.
+- Max rows: 5,000 (beyond → narrow filter)
+- Name: `report_<type>_<YYYY-MM-DD>.csv`
 
 ### Minimum mapping persistence (v1)
 
-- Persist at least: `attio:deal:*` → `[linear:issue:*]` (created/linked)
-- Prefer also: `attio:deal:*` → `linear:project:*` when tool support exists
+- Persist at least: `attio:deal:*` → `[linear:issue:*]`
+- Prefer: `attio:deal:*` → `linear:project:*` when possible
 
-### Deliverables
+### Deliverables (detailed)
 
-- Attio pipeline report + Refresh + Export CSV.
-- Attio deal/client status card.
-- Linear status by deal (grouped by state) with pagination.
-- DB caching TTL for report calls.
+- Pipeline report (Attio) + refresh + export
+- Deal/client status (Attio)
+- Status by deal (Linear) grouped by state
+- Caching:
+  - TTL 60–180s
+  - cache key includes user/tenant/filters
 
-### North Star flows covered
+### Acceptance tests
 
-- NS4 fully
-- NS5 fully (with mapping fallback)
+- NS4 passes.
+- NS5 passes (mapping fallback uses Pick list).
 
 ### DoD
 
-- Report refresh does not hit rate limits in normal use (TTL cache).
-- Export produces a valid CSV file.
-
-### Pitfalls
-
-- Mapping deal→Linear may be missing; must provide a user-facing fallback (pick/search) and store mapping when learned.
+- Reports are fast and do not hit rate limits in normal use.
 
 ---
 
-## Iteration 6 (P1) — Linear kickoff: `/deal won` creates 12 issues (idempotent)
+## Iteration 6 (P1) — Linear kickoff (`/deal won` creates 12 issues, idempotent)
 
-**Goal:** automate the Design Studio kickoff without duplicates.
+### Dependencies
 
-### Deliverables
+- Iteration 1 ledger + bulk gate
 
-- Draft for deal won kickoff:
-  - risk flag: creates 12 issues
-  - shows team
+### Deliverables (detailed)
+
+- Draft shows:
+  - 12 issues to create
+  - bulk warning + extra confirm
 - Apply:
-  - creates 12 issues from template
-  - stores mapping (at minimum: deal → created issue ids)
-  - returns result with links
+  - creates issues idempotently by deterministic keys
+  - stores mapping deal → issue ids
 
-### North Star flows covered
+### Acceptance tests
 
-- NS3 fully
-
-### DoD
-
-- Second Apply returns the same set of created issue ids.
+- NS3 passes.
 
 ---
 
 ## Iteration 7 (P1) — Admin & ops completeness
 
-**Goal:** no manual DB edits; fast recovery.
-
-### Deliverables
+### Deliverables (detailed)
 
 - `/admin env check`
 - `/admin linear teams`
 - `/admin audits last`
 - `/admin draft <id>` inspect
+- Clear guidance for recovery paths
 
 ### DoD
 
-- New environment can be validated end-to-end via admin commands.
+- No manual DB edits in day-to-day ops.
 
 ---
 
@@ -311,237 +337,145 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 - Before starting Iteration 8, declare **feature freeze** for v1 scope (only bugfixes allowed).
 
-**Goal:** stability under real conditions.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Comprehensive test matrix for NS1–NS5 + edge/failure cases.
-- Rate-limit handling verification.
-- Monitoring/logging documentation.
+- Automated regression for NS1–NS5
+- Load sanity (double-click storms)
+- Monitoring docs
 
 ### DoD
 
-- We can run a scripted acceptance session and it passes.
+- Scripted acceptance session passes.
 
 ---
 
 # Iterations (post-v1 → GA)
 
-> These iterations take the bot from a stable v1 to a full product launch (GA).
-
 ## Iteration 9 (P0) — LightRAG integration (read-only, grounded, ACL)
 
-**Goal:** connect LightRAG as bot memory with grounded answers and server-side ACL.
+### Dependencies
 
-### Deliverables
+- LightRAG server meets `docs/lightrag-db-requirements.md`.
 
-- LightRAG client integration:
-  - `brief` (by deal/company) with citations
-  - `ask` Q&A with citations
-- Grounded answer rule:
-  - if citations are missing → return "not found / insufficient evidence"
-- ACL propagation:
-  - bot sends ACL context (team/user/tenant)
-  - LightRAG filters server-side
-- Entity linking workflow:
-  - ambiguity → Pick list
-  - user pick persists as a confirmed mapping
+### Deliverables (detailed)
 
-### DoD
+- `brief(entity)` with citations
+- `ask(question)` with citations
+- ACL propagation + server-side filtering
+- Entity linking loop: ambiguous → pick → persist confirmed mapping
+- Degradation path: LightRAG down → clear message, fallback to non-RAG data
 
-- “brief по ACME (14 дней)” returns summary + 3–5 citations.
-- “что обещали по срокам?” returns only statements with citations.
-- No cross-tenant leakage.
+### Acceptance tests
+
+- brief returns 3–5 citations
+- promise/deadline answers contain citations
 
 ---
 
-## Iteration 10 (P0) — Entity graph navigator (single pane of glass)
+## Iteration 10 (P0) — Entity graph navigator
 
-**Goal:** `/everything <deal|company>` shows a navigable graph across Attio/Linear/Chatwoot/LightRAG.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Unified view:
-  - Attio entity card
-  - Linked Linear issues/projects
-  - Linked Chatwoot conversations
-  - LightRAG brief block
-- UX: paginated sections + pick.
-
-### DoD
-
-- A user can reach any linked object in ≤ 3 clicks from the hub.
+- Unified "everything" view with tabs/sections
+- Persisted confirmed mappings
 
 ---
 
 ## Iteration 11 (P0) — Action items extraction (Chatwoot → Draft tasks)
 
-**Goal:** convert conversation history into a Draft of Linear tasks, safely.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Extract action items from a conversation/time range.
-- Draft shows:
-  - tasks + citations to exact messages
-  - bulk warning and extra confirmation when >=5
-- Dedupe to prevent repeated task creation.
-
-### DoD
-
-- Apply creates tasks exactly once.
-- Re-run produces the same tasks (or explains why changed) with citations.
+- Extract tasks with citations per item
+- Dedupe and idempotent Apply
 
 ---
 
-## Iteration 12 (P1) — Advanced planner + clarification policy + Draft edit
+## Iteration 12 (P1) — Advanced planner + bounded clarifications + Draft edit
 
-**Goal:** handle multi-step multi-domain requests with bounded clarification.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Clarification policy:
-  - max 2 questions at a time
-  - max 3 rounds then fallback to menu/commands
-- Mixed plans (Attio + Linear in one request), still Draft-gated.
-- Draft Edit for common parameters (assignee, due, priority, target).
-
-### DoD
-
-- 80% of common requests complete without forcing slash commands.
+- max clarification policy
+- mixed plans
+- Draft edit UI
 
 ---
 
-## Iteration 13 (P1) — Reminders + scheduled digests (opt-in)
+## Iteration 13 (P1) — Reminders + digests (opt-in)
 
-**Goal:** proactive assistant without spam.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Opt-in reminders for paused deals and commitments (with Draft-confirmed subscription).
-- Weekly digest for selected deals/clients.
-- Quiet hours + timezone aware scheduling.
-
-### DoD
-
-- No reminders are sent without user opt-in and clear settings.
+- opt-in subscriptions
+- timezone and quiet hours
 
 ---
 
-## Iteration 14 (P1) — Settings UX (CryptoBot-style)
+## Iteration 14 (P1) — Settings UX
 
-**Goal:** reduce friction via per-user defaults.
+### Deliverables (detailed)
 
-### Deliverables
-
-- `/settings` menu:
-  - timezone
-  - default Linear team/project/state
-  - report preferences
-- Persist settings in DB.
-
-### DoD
-
-- A user can fully configure without manual env/DB edits.
+- settings menu
+- defaults persisted
 
 ---
 
 ## Iteration 15 (P1) — Bulk import `/client-mass` (optional)
 
-**Goal:** safe bulk create/update.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Bulk parsing + preview + per-item validation.
-- Apply batching + idempotency + audit.
-
-### DoD
-
-- Bulk cannot run without explicit confirmation and preview.
+- preview + validation + idempotent apply
 
 ---
 
 ## Iteration 16 (P0) — Security hardening & compliance
 
-**Goal:** production-grade safety for a bot that handles conversations.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Secrets and PII handling policy.
-- Audit trails.
-- Retention policy + delete flows.
-
-### DoD
-
-- Internal security checklist passes.
+- retention policy
+- delete flows
+- PII redaction by role
 
 ---
 
 ## Iteration 17 (P0) — Observability, SLO, incident playbooks
 
-**Goal:** fast diagnosis and safe degradation.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Metrics for latency/error rates by stage (planner/lightRAG/composio/db).
-- Incident playbooks (LightRAG down / Supabase down / Composio degraded).
-- Feature flags to disable modules.
-
-### DoD
-
-- Every outage mode has a clear user message and admin path.
+- metrics & alerts
+- playbooks
+- feature flags
 
 ---
 
-## Iteration 18 (P1) — Release engineering (staging, canary, migrations discipline)
+## Iteration 18 (P1) — Release engineering
 
-**Goal:** release without breaking users.
+### Deliverables (detailed)
 
-### Deliverables
-
-- dev/staging/prod environments.
-- Canary rollout.
-- Migration workflow (expand/contract) + rollback.
-
-### DoD
-
-- Deploys are repeatable, reversible, and documented.
+- staging/canary
+- migrations discipline
 
 ---
 
 ## Iteration 19 (P0) — QA automation & regression gates
 
-**Goal:** never break North Star flows.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Scripted acceptance runs for NS1–NS5 + RAG flows.
-- Golden snapshots for messages.
-- CI gate to block merges on regressions.
-
-### DoD
-
-- PRs that break NS flows cannot be merged.
+- scripted acceptance
+- CI gates
 
 ---
 
-## Iteration 20 (P0) — GA launch (onboarding + docs + support loop)
+## Iteration 20 (P0) — GA launch
 
-**Goal:** ship a product that people can start using in 5 minutes.
+### Deliverables (detailed)
 
-### Deliverables
-
-- Onboarding flow (`/start`) that validates integrations.
-- User guide + FAQ.
-- "Report a problem" loop (creates an internal issue/ticket via Draft).
-
-### DoD
-
-- New user completes 1 query and 1 mutation successfully within 5 minutes.
+- onboarding
+- docs
+- support loop
 
 ---
 
-# Post-GA backlog (explicit)
+# Post-GA backlog
 
 - Undo (only where safely reversible)
-- Deeper analytics dashboards
-- Additional connectors
+- deeper analytics dashboards
+- additional connectors
