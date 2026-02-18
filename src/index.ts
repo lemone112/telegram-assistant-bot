@@ -31,6 +31,8 @@ type TelegramUpdate = {
   };
 };
 
+type TelegramApiResponse<T> = { ok: true; result: T } | { ok: false; description?: string; error_code?: number };
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -53,18 +55,25 @@ function getAllowedUserSet(env: Env): Set<number> | null {
   return new Set(ids);
 }
 
-async function tgCall(env: Env, method: string, payload: Record<string, unknown>): Promise<any> {
+async function tgCall<T>(env: Env, method: string, payload: Record<string, unknown>): Promise<T> {
   const url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data?.ok === false) {
+
+  const data = (await res.json().catch(() => ({}))) as TelegramApiResponse<T> | Record<string, unknown>;
+
+  // Support both: real Telegram responses and defensive fallback when JSON parse fails.
+  const okFlag = (data as any)?.ok;
+  if (!res.ok || okFlag === false) {
     throw new Error(`Telegram API error: ${res.status} ${JSON.stringify(data)}`);
   }
-  return data;
+
+  // If response matches TelegramApiResponse<T>, return result; otherwise return as-is.
+  if (okFlag === true && (data as any).result !== undefined) return (data as any).result as T;
+  return data as unknown as T;
 }
 
 function parseCommand(msgText: string): { cmd: string; args: string } | null {
@@ -168,7 +177,7 @@ async function resolveStageName(env: Env, stageInput: string): Promise<{ stage_k
     }
   }
 
-  // 2) stage_name exact match (case-insensitive)
+  // 2) stage_name match (case-insensitive)
   {
     const { data, error } = await client.schema(schema).from("deal_stages").select("stage_key,stage_name").ilike("stage_name", normalized).limit(1);
     if (error) throw new Error(`Supabase stage name lookup failed: ${error.message}`);
@@ -181,7 +190,7 @@ async function resolveStageName(env: Env, stageInput: string): Promise<{ stage_k
 
 async function applyDealStage(env: Env, actorId: number, draftId: string, dealId: string, stageInput: string) {
   const composioSettings = await getSettings(env, "composio");
-  const attioConn = composioSettings?.attio_connection_id as string | null;
+  const attioConn = (composioSettings?.attio_connection_id as string | null) ?? null;
   if (!attioConn) throw new Error("Composio Attio connection id is not configured in bot.settings (key=composio)");
 
   const resolved = await resolveStageName(env, stageInput);
@@ -281,7 +290,7 @@ async function handleCommand(env: Env, chatId: number, fromId: number, cmd: stri
         await tgCall(env, "sendMessage", {
           chat_id: chatId,
           text:
-            `Draft создан.\n\nСделка будет переведена в «Выиграно», затем будет создан проект Linear и 12 задач по шаблону.\n\nDeal: ${dealId}\n\nПрименить/Отмена?`,
+            `Draft создан.\n\nСделка будет переведена в «Выиграно», затем будет создан Linear project и 12 задач.\n\nDeal: ${dealId}\n\nПрименить/Отмена?`,
           reply_markup: JSON.stringify(buildInlineKeyboard(draftId)),
         });
         return;
@@ -312,7 +321,12 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   const schema = env.SUPABASE_SCHEMA ?? "bot";
 
   // fetch draft
-  const { data: drafts, error } = await client.schema(schema).from("drafts").select("draft_id,chat_id,author_telegram_user_id,status,payload").eq("draft_id", draftId).limit(1);
+  const { data: drafts, error } = await client
+    .schema(schema)
+    .from("drafts")
+    .select("draft_id,chat_id,author_telegram_user_id,status,payload")
+    .eq("draft_id", draftId)
+    .limit(1);
   if (error) throw new Error(`Supabase draft fetch failed: ${error.message}`);
   const draft = drafts?.[0] as any as DraftRow | undefined;
   if (!draft) {
@@ -345,7 +359,6 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   {
     const { error: idemErr } = await client.schema(schema).from("idempotency_keys").insert({ key: idemKey, draft_id: draftId } as any);
     if (idemErr) {
-      // conflict means already applied
       await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Already applied" });
       return;
     }
