@@ -1,51 +1,26 @@
-# Supabase: схема БД (актуально после reset A)
+# Supabase: схема БД (актуально)
 
-В этом проекте выбран вариант **A**: "полностью очистить `public` и перестроить".
+Вариант reset: **A** (очистка `public` и перестройка; functions в public не удаляем из-за extensions).
 
-> Важно: reset — разрушительное действие. В миграции **не удаляются functions** в `public`, потому что некоторые из них принадлежат extensions (например `vector`).
+## Таблицы (public)
 
-## Список таблиц (public)
-
+Базовые:
 - `telegram_users`
 - `drafts`
 - `draft_apply_attempts`
 - `external_links`
 - `audit_log`
 
-## Таблица `telegram_users`
+Состояния и bulk:
+- `user_input_state`
+- `draft_bulk_items`
 
-- `id` uuid pk
-- `telegram_user_id` bigint unique
-- базовые поля профиля
+Кэши Linear:
+- `linear_users_cache`
+- `linear_teams_cache`
+- `linear_projects_cache`
 
-## Таблица `drafts`
+## Миграции
 
-- хранит Draft (черновик) + jsonb `actions`, `assumptions`, `risks`, `questions`
-- `status`: DRAFT/APPLIED/CANCELLED/EXPIRED
-
-## Таблица `draft_apply_attempts`
-
-- фиксирует идемпотентные попытки apply
-- уникальность `(draft_id, callback_query_id)`
-
-## Таблица `external_links`
-
-- связывает Draft с созданными сущностями в Attio/Linear
-
-## Таблица `audit_log`
-
-- минимальный audit trail
-
-## Ограничение 500MB
-
-Рекомендации:
-
-- ограничивать длину `source_text`/`transcript`
-- чистить старые Draft/attempts/log по TTL
-- не хранить вложения
-
-## Миграция
-
-См. файл:
-
-- `supabase/migrations/0001_reset_public_and_create_bot_schema.sql`
+- `0001_reset_public_and_create_bot_schema.sql`
+- `0002_user_state_and_linear_caches.sql`
