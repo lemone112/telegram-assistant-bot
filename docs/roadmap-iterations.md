@@ -116,102 +116,240 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ## Iteration 1 (P0) — Safety backbone + deterministic execution model
 
-**Why this exists:** without it we will create duplicates, leak writes through queries, and fail under retries.
+**Goal:** make it *impossible* to accidentally write without Draft and *impossible* to duplicate side-effects.
+
+### Why this iteration is critical (failure modes)
+
+If we ship features before this is done, we will:
+
+- create duplicate Linear issues / Attio updates under retries and double-clicks
+- accidentally execute writes when the user thinks they are running a query
+- be unable to debug Apply outcomes
+- leak sensitive details in errors/logs
+
+### Scope (what is IN)
+
+- Ledger-backed idempotency for **callbacks** and **side-effect units**
+- Strict tool routing policy via allowlists/denylists (planner is not trusted)
+- Retry/backoff wrappers with deadlines
+- Error taxonomy + short user-facing renderer
+- Bulk risk gate (>=5 operations) + extra confirmation step
+- Per-action observability (external ids, timings, outcomes)
+
+### Out of scope (what is NOT in Iteration 1)
+
+- Voice STT
+- Fancy UI rendering beyond safe Draft/Apply messages
+- New business flows (deal won kickoff, reports)
 
 ### Dependencies
 
-- Supabase schema supports drafts/idempotency/apply attempts.
+- Supabase runtime tables exist and are writable.
+- Cloudflare Worker can reach Supabase + Composio.
 
-### Implementation tracker (GitHub Issues)
+### Design (detailed)
 
-- #11 Tool allowlists/denylist + strict query vs mutate gate
-- #12 Idempotency ledger (key → result)
-- #13 Error taxonomy + user-facing renderer
-- #14 Retry/backoff wrapper
-- #15 Bulk risk gate + extra confirmation
-- #16 Per-action observability
+#### 1) Idempotency ledger model
 
-### Deliverables (detailed)
+We need **two layers**:
 
-- **Idempotency ledger**
-  - key format standards for:
-    - Telegram callbacks
-    - side-effect operations (per entity)
-  - store: status, result payload, external ids, error, timestamps
-- **Tool policy**
-  - read-only allowlist
-  - mutate allowlist
-  - denylist
-  - rule: unknown tool slugs are blocked
-- **Retry policy**
-  - retry on 429/5xx/network
-  - deadlines and max attempts
-  - safe integration with idempotency
-- **Error taxonomy + rendering**
-  - USER_INPUT / CONFIG / UPSTREAM / DB
-  - short user message + next step
-- **Bulk gate**
-  - >=5 ops triggers extra confirmation
+1) **Telegram callback idempotency**
+   - key: `tg:callback:<callback_query_id>`
+   - purpose: protect against Telegram redeliveries and double taps
 
-### Acceptance tests
+2) **Side-effect unit idempotency** (the important one)
+   - keys must be deterministic and represent *one* external effect
+   - examples:
+     - Attio stage update: `attio:update_deal_stage:<deal_id>:<target_stage_key>`
+     - Linear issue create from template: `linear:create_issue:<deal_id>:<template_task_key>`
 
-- Callback replay: same `callback_query_id` received twice → second returns stored result, no extra DB writes.
-- Operation replay: same side-effect key (e.g. `linear:create_issue:<deal>:<template_key>`) executed twice via different callbacks → second returns stored result.
-- Concurrency: two Apply requests in parallel for same Draft → exactly one wins, one observes `in_progress` and then returns stored `succeeded` result.
-- Retry safety: simulate 429 then success → ledger stores final external ids and prevents duplicate creates.
-- Error classification: missing env var → CONFIG; invalid user input → USER_INPUT; upstream 5xx → UPSTREAM; DB down → DB.
-- Allowlist enforcement: planner attempts a non-allowlisted mutate tool → blocked; planner attempts mutate while intent=query → forced Draft or blocked.
-- Bulk gate: 5 ops triggers extra confirmation; 4 ops does not.
-- Logging: per-action outcomes include correlation id and external ids; no secrets in logs.
+**Ledger record** must store:
+
+- `key`
+- `status`: `in_progress|succeeded|failed`
+- `started_at`, `finished_at`
+- `result_payload` (JSON) including `external_ids`
+- `error` (code/message/details), if failed
+
+**Concurrency rule:**
+
+- first request sets `in_progress`
+- concurrent requests:
+  - either wait/poll briefly and then return stored result
+  - or return a safe “already processing” response (but must not re-run)
+
+#### 2) Tool policy
+
+Maintain explicit sets in code:
+
+- `READ_ONLY_TOOL_SLUGS`
+- `MUTATE_TOOL_SLUGS`
+- `DENY_TOOL_SLUGS`
+
+Rules:
+
+- if tool is not in allowlists → block (CONFIG/SECURITY)
+- if intent=query but tool is mutate → force Draft or block
+- denylist always blocks
+
+**Note:** This is essential for safe Composio MCP routing.
+
+#### 3) Retry/backoff
+
+Implement `withRetry()` that:
+
+- retries on 429 / 5xx / network
+- exponential backoff + jitter
+- max attempts + total deadline
+
+**Rule:** retries must never create duplicate side-effects → always combine with ledger keys.
+
+#### 4) Bulk risk gate
+
+Policy:
+
+- count planned operations (creates/updates/deletes)
+- if >=5:
+  - show bulk warning (Draft)
+  - require extra confirmation step (e.g., `✅ Apply (confirm)`)
+
+#### 5) Error taxonomy + renderer
+
+Normalize all errors into:
+
+- `USER_INPUT`
+- `CONFIG`
+- `UPSTREAM`
+- `DB`
+
+User-facing errors are:
+
+- 1–3 lines
+- include a clear next step
+- never include secrets
+
+#### 6) Per-action observability
+
+For each Apply, store:
+
+- correlation id
+- action id / idempotency scope
+- timings
+- external ids
+- outcome
+
+### Acceptance tests (max)
+
+- Callback replay: same `callback_query_id` twice → second returns stored result, no extra writes.
+- Operation replay: same side-effect key executed twice via different callbacks → second returns stored result.
+- Concurrency: two Apply requests in parallel → exactly one executes.
+- Retry: 429 then success → no duplicates.
+- Query/mutate safety: planner tries to run mutate tool in query mode → blocked/forced Draft.
+- Bulk boundary: 4 ops no extra confirm; 5 ops requires extra confirm.
+- No secrets in logs/errors.
 
 ### DoD
 
-- All mutations are gated and ledger-backed.
-- Repeat executions are safe.
+- No side-effect can be executed twice under any combination of retries, double taps, or webhook redelivery.
+- Unknown tools cannot execute.
+- Admin/debug can inspect ledger and apply attempts.
 
 ---
 
 ## Iteration 2 (P0) — CryptoBot UX system (renderer + buttons + hub)
 
+**Goal:** ship a consistent, button-driven UX so the bot is usable without typing commands.
+
+### Why this iteration is critical
+
+Without a strict UX system:
+
+- users cannot safely resolve ambiguity
+- Draft previews become unreadable
+- the bot becomes “chatty” and unreliable in Telegram UI constraints
+
 ### Dependencies
 
-- Iteration 1 safety backbone (callbacks must be safe).
+- Iteration 1 safety backbone (callbacks must be safe; Draft expiry enforced).
 
-### Deliverables (detailed)
+### Scope
 
-- Rendering components:
-  - Card, List, Draft, Result, Error
-- Pagination sessions:
-  - page cursor, TTL, ownership
-- Callback protocol:
-  - versioned payloads
-  - validation
-- `/menu` hub:
-  - Reports / Deals / Tasks / Settings / Help
-  - sub-menus
+- Message rendering primitives (Card/List/Draft/Result/Error)
+- Inline keyboard patterns + versioned callback payload schema
+- Pagination sessions (<=8 items/page)
+- Pick list for ambiguity
+- `/menu` hub + sub-menus
+- Draft expiry UX + rebuild
 
-### Acceptance tests
+### Design (detailed)
 
-- List pagination: 25 items → pages 1–4, Prev/Next works, and Pick indexes map correctly per page.
-- Pick ownership: user B cannot pick from user A’s list session (blocked USER_INPUT).
-- Callback payload validation: malformed/unknown version payload → safe error, no side-effects.
-- Draft expiry UX: expired draft Apply → shows expired message + rebuild option; does not run.
-- Hub: `/menu` is idempotent (multiple presses update/replace same hub message without spam).
-- Message formatting: no message exceeds Telegram limits in typical scenarios; long fields are truncated with `…`.
-- Accessibility: buttons order is consistent across Card/List/Draft/Result.
+#### 1) Renderer primitives
+
+- **Card**: single entity, short title + key fields + links
+- **List**: 1–8 items/page, stable item numbering, prev/next
+- **Draft**: steps + resolved targets + risk flags + buttons
+- **Result**: applied summary + external links + optional repeat
+- **Error**: category + next step
+
+**Telegram formatting rules:**
+
+- hard limit on lines and characters
+- truncate long fields with `…`
+- no nested huge markdown tables
+
+#### 2) Callback payload schema
+
+- versioned: `v1|<kind>|<session_or_draft_id>|<action>|<args>`
+- kinds:
+  - `nav` (pagination)
+  - `pick` (select candidate)
+  - `draft` (apply/cancel/details/rebuild)
+  - `menu` (hub navigation)
+
+Validation:
+
+- reject unknown version
+- reject payloads not owned by current user
+
+#### 3) Pagination sessions
+
+Store:
+
+- list session id
+- owner user id
+- items snapshot (ids + display)
+- created_at + TTL
+
+#### 4) Draft expiry + rebuild
+
+- Draft has `expires_at`
+- Apply after expiry:
+  - show “expired”
+  - button: `Rebuild draft`
+
+### Acceptance tests (max)
+
+- 25-item list paginates to 4 pages; pick indexes map correctly.
+- User B cannot pick user A’s list.
+- Malformed callback payload → safe Error, no side-effects.
+- `/menu` is idempotent (no spam).
+- Draft expiry flow works end-to-end.
 
 ### DoD
 
-- 12+ golden snapshots
-- no truncation in typical messages
+- UI components are reusable and consistent.
+- All ambiguity goes through Pick list.
 
 ---
 
 ## Iteration 3 (P0) — Voice pipeline (STT) with transcript confirmation
 
+**Goal:** voice is first-class, safe, and predictable.
+
 ### Dependencies
 
-- Iteration 2 UX components (transcript UI).
+- Iteration 2 UI components.
+- Iteration 1 safety (no duplicate drafts/side-effects).
 
 ### Voice limits (v1)
 
@@ -220,104 +358,152 @@ These flows define “the bot is ready”. We implement them progressively and m
 - RU/EN autodetect (best-effort)
 - Low-confidence threshold: **< 0.70** → require confirm/edit
 
-### Deliverables (detailed)
+### Design (detailed)
 
-- Voice download + STT
-- Transcript UX:
-  - Use transcript / Edit text / Cancel
-- Degradation:
-  - STT down → ask for text
-  - low confidence → force confirm/edit
+#### 1) Voice ingestion
 
-### Acceptance tests
+- download voice file
+- validate size/duration upfront
+- run STT
 
-- Voice >120s or >20MB → immediate friendly error + ask for text; no STT attempt.
-- Voice RU: transcript produced; user edits transcript; edited text is used for planning.
-- Voice EN: transcript produced; language preserved.
-- Low-confidence (<0.70): bot forces confirm/edit (no auto-plan).
-- STT provider failure/timeout: bot responds with fallback to text and logs UPSTREAM.
-- Duplicate voice update delivery (webhook redelivery): transcript step is idempotent and does not create multiple drafts.
+#### 2) Transcript UX
+
+- show transcript preview
+- buttons:
+  - `✅ Use transcript`
+  - `✏️ Edit text`
+  - `❌ Cancel`
+
+#### 3) Degradation policy
+
+- STT failure/timeout → ask for text
+- low confidence → require confirm/edit
+- webhook redelivery → idempotent transcript stage
+
+### Acceptance tests (max)
+
+- >120s or >20MB → no STT, friendly error.
+- low confidence forces confirm/edit.
+- STT timeout → fallback to text.
 
 ### DoD
 
-- Voice always results in transcript flow or safe fallback.
+- Voice never triggers a side-effect without transcript confirmation and Draft.
 
 ---
 
 ## Iteration 4 (P0) — Attio core (deal resolution + `/deal stage` reference quality)
 
+**Goal:** one mutation and one query become reference-quality, proving the whole safety+UX stack.
+
 ### Dependencies
 
-- Iteration 1 (idempotency) + Iteration 2 (pick list)
+- Iteration 1 (idempotency, allowlists, retries)
+- Iteration 2 (List/Pick/Card)
 
-### Deliverables (detailed)
+### Scope
 
-- Deal resolver:
-  - search by text
-  - ambiguous → Pick list
-  - cache last selected deal per user (TTL)
-- `/deal stage`:
-  - preview resolves stage name
-  - no-op detection
-  - Apply uses idempotency per (deal_id, target_stage)
+- Deal resolver (search + pick)
+- Deal card
+- `/deal stage` Draft → Apply
+- Stage aliases
+- No-op handling
 
-### Acceptance tests
+### Design (detailed)
 
-- Deal search ambiguous: returns Pick list; selecting candidate persists mapping for the user session.
-- Deal search exact: goes straight to Card.
-- Stage alias input: user uses alias → preview shows resolved canonical stage name.
-- No-op: setting stage to current stage returns Result explaining “already in stage” and does not call upstream.
-- Apply idempotency: repeating stage change Apply returns stored success.
-- Upstream rate limit: 429 on stage update → retries; no duplicate write.
-- Permissions: Attio access denied → UPSTREAM error; Draft remains but Apply blocked.
+#### 1) Deal resolver
+
+- search by text
+- if 0 results → ask refine
+- if 1 result → select
+- if >1 → Pick list
+
+Persist:
+
+- last selected deal per user (TTL) for context
+
+#### 2) `/deal stage`
+
+Draft preview must show:
+
+- deal name
+- current stage
+- target stage (resolved canonical name)
+
+Apply:
+
+- idempotency key per (deal_id, target_stage)
+- retries on upstream failures
+
+No-op:
+
+- if already in target stage → return Result, no upstream write
+
+### Acceptance tests (max)
+
+- ambiguous deal → Pick → selection persists
+- stage alias resolves
+- no-op does not write
+- 429 retries safely
 
 ### DoD
 
-- Stage changes apply exactly once.
+- NS1 (text variant) can be executed safely once voice exists.
 
 ---
 
 ## Iteration 5 (P1) — Reports v1 (Attio + Linear) with export/caching
 
+**Goal:** high-utility read-only experiences with correct caching and safe mapping.
+
 ### Dependencies
 
-- Iteration 2 (hub) + Iteration 1 (safe execution)
+- Iteration 1 safety backbone
+- Iteration 2 hub + pagination
 
-### CSV export format (v1)
+### Scope
 
-- Encoding: UTF-8
-- Delimiter: comma (`,`) 
-- Max rows: 5,000 (beyond → narrow filter)
-- Name: `report_<type>_<YYYY-MM-DD>.csv`
-
-### Minimum mapping persistence (v1)
-
-- Persist at least: `attio:deal:*` → `[linear:issue:*]`
-- Prefer: `attio:deal:*` → `linear:project:*` when possible
-
-### Deliverables (detailed)
-
-- Pipeline report (Attio) + refresh + export
-- Deal/client status (Attio)
+- Pipeline report (Attio)
+- Deal/client status card (Attio)
 - Status by deal (Linear) grouped by state
-- Caching:
-  - TTL 60–180s
-  - cache key includes user/tenant/filters
+- Export CSV
+- Cache TTL
+- Mapping persistence (deal → issue ids / project if possible)
 
-### Acceptance tests
+### Design (detailed)
 
-- Pipeline report: counts by stage render; refresh within TTL uses cache; refresh after TTL refetches.
-- Export CSV: produces valid UTF-8 CSV, correct filename, row count <= 5,000; if >5,000 → asks to narrow filter.
-- Cache key isolation: two users same query do not see each other’s cached data if ACL differs.
-- Status by deal mapping missing: bot asks Pick/search; after pick mapping persists and next run is direct.
-- Linear down: status by deal returns clear error and suggests retry; other Attio reports still work.
-- Grounding rule: if report includes any derived statement from history (post-v1), citations must be present (guarded).
+#### 1) Report caching
+
+- TTL: 60–180s
+- cache key includes:
+  - tenant
+  - user role/ACL
+  - filters
+
+#### 2) CSV export
+
+- UTF-8, comma
+- max rows 5,000
+- if exceeded → ask narrow filter
+
+#### 3) Mapping rules
+
+- if mapping exists → use directly
+- if mapping missing:
+  - ask Pick
+  - persist confirmed mapping
+
+### Acceptance tests (max)
+
+- refresh within TTL uses cache
+- export enforces max rows
+- mapping missing triggers pick and then persists
+- ACL isolation prevents cross-user cache leakage
 
 ### DoD
 
-- Reports are fast and do not hit rate limits in normal use.
+- NS4 and NS5 are achievable and stable.
 
----
 
 ## Iteration 6 (P1) — Linear kickoff (`/deal won` creates 12 issues, idempotent)
 
