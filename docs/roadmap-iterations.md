@@ -381,9 +381,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 10 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- `/menu` → Deals → Pick deal → `Everything` view renders 4 sections: Attio, Linear, Chatwoot, LightRAG.
+- If a deal has 0 linked Chatwoot threads, UI shows `No conversations found` (not empty/failed).
+- Clicking a linked Linear issue opens a Card with a stable URL.
+- If entity mapping is ambiguous, user must Pick before `Everything` is rendered.
+- ACL: a user without `team:support` cannot see Chatwoot snippets/links even if other sections load.
 
 ### DoD
 
@@ -411,9 +413,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 11 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- Given a Chatwoot conversation with 40 messages, extraction returns 3–15 action items, each with at least 1 citation linking to a message.
+- Bulk threshold: if extracted tasks >= 5, Draft shows bulk warning and requires extra confirm before Apply.
+- Apply creates Linear issues exactly once: repeating Apply returns the same issue ids (ledger-backed).
+- If Linear is down, Apply is blocked with `Linear unavailable` and Draft remains retriable.
+- If citations are missing for an item, that item must be omitted or marked `insufficient evidence` (no silent hallucination).
 
 ### DoD
 
@@ -441,9 +445,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 12 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- Clarification loop never asks more than 2 questions in one message.
+- After 3 clarification rounds without resolution, bot offers `/menu` and a structured command fallback (no infinite loop).
+- Mixed request test: “обнови стадию сделки ACME на paused и создай задачу в Linear” produces one Draft with two actions and separate previews.
+- Draft Edit can change due date and assignee; edited values appear in preview and are applied.
+- Allowlist enforcement holds: planner cannot cause execution of tools outside allowlists.
 
 ### DoD
 
@@ -472,9 +478,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 13 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- User opts in to reminders via Draft-confirmed subscription; without opt-in, no reminders are sent.
+- Quiet hours respected: reminders are delayed to the next allowed window in user timezone.
+- Digest generation includes citations for any “history-based” statements.
+- Unsubscribe flow stops future messages immediately.
+- Failure mode: if scheduler/job fails, reminders are not duplicated (idempotency for sends).
 
 ### DoD
 
@@ -502,9 +510,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 14 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- `/settings` can set timezone; subsequent time renderings use that timezone.
+- Default Linear team/state selection is persisted; creating a task uses defaults without asking again.
+- Settings changes are immediately reflected in subsequent Draft previews.
+- ACL-related settings cannot be escalated by user input (server-side authority).
+- Settings UI is fully operable via buttons (no manual env edits).
 
 ### DoD
 
@@ -532,9 +542,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 15 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- Bulk input preview shows per-item validation errors with item indexes.
+- Apply refuses to run if any item is invalid unless user explicitly deselects invalid items.
+- Apply runs in batches and is idempotent per item; re-run does not duplicate created records.
+- If upstream rate limits occur mid-batch, resume is possible without duplicates.
+- Audit log contains counts: attempted/succeeded/failed.
 
 ### DoD
 
@@ -561,9 +573,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 16 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- Retention policy is enforced: cached artifacts older than TTL are not retrievable.
+- Delete flow test: deleting a user-scoped dataset makes it non-searchable and non-retriavable.
+- PII redaction: a support-only field is not shown to sales role.
+- Secrets never appear in logs or user-facing errors.
+- Security review checklist passes (documented evidence).
 
 ### DoD
 
@@ -592,9 +606,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 17 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- Metrics exist for: planner latency, composio latency, supabase latency, LightRAG latency, error rates by category.
+- Alert triggers on sustained 429s/5xx or high error rates.
+- Playbook drill: simulate LightRAG down → bot shows correct degradation message and continues non-RAG flows.
+- Feature flag can disable LightRAG integration without redeploy.
+- Incident record contains correlation ids to trace a user request.
 
 ### DoD
 
@@ -623,9 +639,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 18 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- Staging deploy uses separate env/DB and does not affect prod.
+- Canary rollout enables new version for a subset of users; rollback restores previous behavior.
+- Migration discipline: apply forward-compatible migration, then deploy app; rollback does not break reads.
+- Zero-downtime deploy for webhook handler (no missing updates).
+- Release notes generated from merged PRs/issues.
 
 ### DoD
 
@@ -653,9 +671,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 19 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- CI runs a scripted NS1–NS5 suite and fails the PR if any step regresses.
+- Golden snapshot tests detect formatting drift for Card/List/Draft/Result.
+- Load test: simulate 20 rapid Apply clicks; system performs exactly one side-effect.
+- ACL test suite ensures no cross-role leakage.
+- RAG grounding test suite: any answer without citations fails.
 
 ### DoD
 
@@ -683,9 +703,11 @@ These flows define “the bot is ready”. We implement them progressively and m
 
 ### Acceptance tests
 
-- Core scenario for Iteration 20 runs end-to-end in staging
-- No missing citations when grounded answers are expected
-- No data leakage across ACL boundaries
+- New user onboarding: `/start` guides to connect integrations, then validates env and connections.
+- Onboarding ends with one successful query and one successful Draft→Apply mutation.
+- Help/FAQ accessible from `/menu` and answers are short and actionable.
+- Support loop: “report a problem” creates an internal ticket/issue via Draft with attached context.
+- First-run experience completes within 5 minutes for a user with valid credentials.
 
 ### DoD
 
