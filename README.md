@@ -36,6 +36,7 @@
 
 - UX spec: [docs/ux.md](docs/ux.md)
 - Iterations plan: [docs/roadmap-iterations.md](docs/roadmap-iterations.md)
+- Code review policy: see **Codex review comments** in PRs (mandatory)
 
 ## Статус
 

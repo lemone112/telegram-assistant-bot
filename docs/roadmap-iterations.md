@@ -11,6 +11,14 @@ This document is the **authoritative execution plan** for this repository.
   - Explicit **dependencies** and **pitfalls**
 - We prefer small PRs; however, we do not split so hard that we ship half-features.
 
+## Code review policy (MANDATORY)
+
+Every PR must be reviewed with special attention to **Codex** review comments.
+
+- Always open the PR "Files changed" and the **Codex** review thread(s).
+- Treat Codex findings as a checklist: either fix the code or explicitly justify why not.
+- Do not merge when Codex flags: idempotency gaps, unsafe tool routing, missing allowlists, or retry/rate-limit issues.
+
 ---
 
 ## Planning gate (Iteration 0) — COMPLETE ✅
