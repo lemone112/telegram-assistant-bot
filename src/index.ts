@@ -167,6 +167,19 @@ async function upsertSettingsValue(env: Env, key: string, value: any) {
   if (error) throw new Error(`Supabase upsert settings(${key}) failed: ${error.message}`);
 }
 
+function safeJsonPreview(value: any, maxLen = 1200): string {
+  const s = JSON.stringify(value ?? null, null, 2);
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen) + "\n...<truncated>";
+}
+
+async function patchComposioSettings(env: Env, patch: Record<string, unknown>) {
+  const current = (await getSettingsValue(env, "composio")) ?? {};
+  const next = { ...(typeof current === "object" && current ? current : {}), ...patch };
+  await upsertSettingsValue(env, "composio", next);
+  return next;
+}
+
 async function audit(
   env: Env,
   draftDbId: string | null,
@@ -204,7 +217,6 @@ async function createApplyAttempt(env: Env, draftDbId: string, idempotencyKey: s
     .maybeSingle();
 
   if (error) {
-    // If unique constraint triggers, this is fine; idempotency gate should already stop re-apply.
     throw new Error(`Supabase create apply attempt failed: ${error.message}`);
   }
 
@@ -314,7 +326,9 @@ async function handleAdminCommand(env: Env, chatId: number, fromId: number, args
       text:
         "Admin commands:\n" +
         "/admin status\n" +
-        "/admin composio attio <connected_account_id>\n",
+        "/admin composio show\n" +
+        "/admin composio attio <connected_account_id>\n" +
+        "/admin composio linear <connected_account_id>\n",
     });
     return;
   }
@@ -322,33 +336,72 @@ async function handleAdminCommand(env: Env, chatId: number, fromId: number, args
   if (sub === "status") {
     const composio = await getSettingsValue(env, "composio");
     const attioConn = composio?.attio_connection_id ?? null;
+    const linearConn = composio?.linear_connection_id ?? null;
     await tgCall(env, "sendMessage", {
       chat_id: chatId,
       text:
         "Status:\n" +
         `- schema: ${schema(env)}\n` +
-        `- composio.attio_connection_id: ${attioConn ? attioConn : "<not set>"}\n`,
+        `- composio.attio_connection_id: ${attioConn ? attioConn : "<not set>"}\n` +
+        `- composio.linear_connection_id: ${linearConn ? linearConn : "<not set>"}\n`,
     });
     return;
   }
 
   if (sub === "composio") {
     const [tool, value] = rest;
-    if (tool !== "attio" || !value) {
+
+    if (!tool) {
+      await tgCall(env, "sendMessage", { chat_id: chatId, text: "Usage: /admin composio show|attio|linear ..." });
+      return;
+    }
+
+    if (tool === "show") {
+      const composio = await getSettingsValue(env, "composio");
       await tgCall(env, "sendMessage", {
         chat_id: chatId,
-        text: "Usage: /admin composio attio <connected_account_id>",
+        text: "bot.settings[composio] =\n" + safeJsonPreview(composio),
       });
       return;
     }
 
-    const next = { attio_connection_id: value };
-    await upsertSettingsValue(env, "composio", next);
+    if (tool === "attio") {
+      if (!value) {
+        await tgCall(env, "sendMessage", {
+          chat_id: chatId,
+          text: "Usage: /admin composio attio <connected_account_id>",
+        });
+        return;
+      }
 
-    await tgCall(env, "sendMessage", {
-      chat_id: chatId,
-      text: `Saved: composio.attio_connection_id = ${value}`,
-    });
+      const next = await patchComposioSettings(env, { attio_connection_id: value });
+
+      await tgCall(env, "sendMessage", {
+        chat_id: chatId,
+        text: "Saved.\n\nbot.settings[composio] =\n" + safeJsonPreview(next),
+      });
+      return;
+    }
+
+    if (tool === "linear") {
+      if (!value) {
+        await tgCall(env, "sendMessage", {
+          chat_id: chatId,
+          text: "Usage: /admin composio linear <connected_account_id>",
+        });
+        return;
+      }
+
+      const next = await patchComposioSettings(env, { linear_connection_id: value });
+
+      await tgCall(env, "sendMessage", {
+        chat_id: chatId,
+        text: "Saved.\n\nbot.settings[composio] =\n" + safeJsonPreview(next),
+      });
+      return;
+    }
+
+    await tgCall(env, "sendMessage", { chat_id: chatId, text: "Unknown composio admin command" });
     return;
   }
 
@@ -533,7 +586,6 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
 
   const idempotencyKey = `tg:callback:${cb.id}`;
 
-  // Idempotency gate
   {
     const { error: idemErr } = await client
       .schema(sch)
@@ -545,7 +597,6 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
     }
   }
 
-  // Observability
   const attemptId = await createApplyAttempt(env, draftDbId, idempotencyKey);
 
   await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Applying..." });
