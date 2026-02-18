@@ -148,8 +148,8 @@ async function upsertTelegramUser(env: Env, from: { id: number; username?: strin
     .select("id,telegram_user_id")
     .maybeSingle();
 
-  if (error) throw new Error(`Supabase upsert telegram_user failed: ${error.message}`);
-  if (!data?.id) throw new Error("Supabase upsert telegram_user returned no id");
+  if (error) throw new Error(`Supabase upsert telegram_users failed: ${error.message}`);
+  if (!data?.id) throw new Error("Supabase upsert telegram_users returned no id");
 
   return data as { id: string; telegram_user_id: number };
 }
@@ -324,22 +324,14 @@ async function applyDealStage(env: Env, actorTelegramId: number, draftDbId: stri
   return resolved;
 }
 
-async function ensureLinearKickoff(
-  env: Env,
-  actorTelegramId: number,
-  draftDbId: string,
-  attioDealId: string,
-  linearTeamId: string
-) {
+async function ensureLinearKickoff(env: Env, actorTelegramId: number, draftDbId: string, attioDealId: string, linearTeamId: string) {
   const client = supa(env);
   const sch = schema(env);
 
   const composioSettings = await getSettingsValue(env, "composio");
   const linearConn = (composioSettings?.linear_connection_id as string | null) ?? null;
   if (!linearConn) {
-    throw new Error(
-      "Composio Linear connection id is not configured. Set it via /admin composio linear <connected_account_id>"
-    );
+    throw new Error("Composio Linear connection id is not configured. Set it via /admin composio linear <connected_account_id>");
   }
 
   // 1) Check mapping (idempotent)
@@ -438,6 +430,22 @@ async function ensureLinearKickoff(
   return { linear_project_id: linearProjectId, project_name: projectName, created_issues: created };
 }
 
+async function listLinearTeams(env: Env) {
+  const composioSettings = await getSettingsValue(env, "composio");
+  const linearConn = (composioSettings?.linear_connection_id as string | null) ?? null;
+  if (!linearConn) {
+    throw new Error("Composio Linear connection id is not configured. Set it via /admin composio linear <connected_account_id>");
+  }
+
+  const teams = await composioExecute(env, {
+    tool_slug: "LINEAR_GET_ALL_LINEAR_TEAMS",
+    connected_account_id: linearConn,
+    arguments: {},
+  });
+
+  return teams;
+}
+
 async function handleAdminCommand(env: Env, chatId: number, fromId: number, args: string) {
   assertAdmin(env, fromId);
 
@@ -451,7 +459,8 @@ async function handleAdminCommand(env: Env, chatId: number, fromId: number, args
         "/admin status\n" +
         "/admin composio show\n" +
         "/admin composio attio <connected_account_id>\n" +
-        "/admin composio linear <connected_account_id>\n", 
+        "/admin composio linear <connected_account_id>\n" +
+        "/admin linear teams\n",
     });
     return;
   }
@@ -469,6 +478,52 @@ async function handleAdminCommand(env: Env, chatId: number, fromId: number, args
         `- composio.linear_connection_id: ${linearConn ? linearConn : "<not set>"}\n` +
         `- LINEAR_TEAM_ID env: ${env.LINEAR_TEAM_ID ? env.LINEAR_TEAM_ID : "<not set>"}\n`,
     });
+    return;
+  }
+
+  if (sub === "linear") {
+    const [action] = rest;
+    if (action !== "teams") {
+      await tgCall(env, "sendMessage", { chat_id: chatId, text: "Usage: /admin linear teams" });
+      return;
+    }
+
+    try {
+      const teams = await listLinearTeams(env);
+
+      const list: any[] =
+        (teams as any)?.teams ??
+        (teams as any)?.data?.teams ??
+        (teams as any)?.nodes ??
+        (teams as any)?.data?.nodes ??
+        (Array.isArray(teams) ? (teams as any[]) : []);
+
+      const lines = (list || []).slice(0, 50).map((t) => {
+        const id = t?.id ?? "<no id>";
+        const key = t?.key ? ` (${t.key})` : "";
+        const name = t?.name ?? "<no name>";
+        return `- ${name}${key}: ${id}`;
+      });
+
+      const msg =
+        "Linear teams (use the UUID as LINEAR_TEAM_ID):\n\n" +
+        (lines.length ? lines.join("\n") : "<no teams found>") +
+        "\n\nSet GitHub Actions variable LINEAR_TEAM_ID to the chosen UUID.";
+
+      await tgCall(env, "sendMessage", { chat_id: chatId, text: msg });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await tgCall(env, "sendMessage", {
+        chat_id: chatId,
+        text:
+          "Failed to list Linear teams.\n\n" +
+          "Checklist:\n" +
+          "1) Configure Composio Linear connection: /admin composio linear <connected_account_id>\n" +
+          "2) Ensure COMPOSIO_API_KEY is set in env\n\n" +
+          `Error: ${msg}`,
+      });
+    }
+
     return;
   }
 
@@ -644,7 +699,7 @@ async function handleCommand(env: Env, chatId: number, from: NonNullable<Telegra
         return;
       }
 
-      await tgCall(env, "sendMessage", { chat_id: chatId, text: "Пока реализовано: /deal stage, /deal won." });
+      await tgCall(env, "sendMessage", { chat_id: chatId, text: "Неизвестная команда: /deal stage, /deal won" });
       return;
     }
 
@@ -689,11 +744,7 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   }
 
   if (action === "cancel") {
-    const { error: e2 } = await client
-      .schema(sch)
-      .from("drafts")
-      .update({ status: "CANCELLED" } as any)
-      .eq("id", draftDbId);
+    const { error: e2 } = await client.schema(sch).from("drafts").update({ status: "CANCELLED" } as any).eq("id", draftDbId);
     if (e2) throw new Error(`Supabase cancel failed: ${e2.message}`);
 
     await audit(env, draftDbId, "draft.cancel", "info", { actor_telegram_user_id: cb.from.id });
@@ -711,10 +762,7 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
   const idempotencyKey = `tg:callback:${cb.id}`;
 
   {
-    const { error: idemErr } = await client
-      .schema(sch)
-      .from("idempotency_keys")
-      .insert({ key: idempotencyKey, draft_id: draftDbId } as any);
+    const { error: idemErr } = await client.schema(sch).from("idempotency_keys").insert({ key: idempotencyKey, draft_id: draftDbId } as any);
     if (idemErr) {
       await tgCall(env, "answerCallbackQuery", { callback_query_id: cb.id, text: "Already applied" });
       return;
@@ -737,7 +785,6 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
 
       await client.schema(sch).from("drafts").update({ status: "APPLIED" } as any).eq("id", draftDbId);
       await audit(env, draftDbId, "draft.apply", "info", { actor_telegram_user_id: cb.from.id, type: first.type });
-
       await finishApplyAttempt(env, attemptId, { ok: true, stage: resolved }, null);
 
       await tgCall(env, "sendMessage", {
@@ -755,17 +802,15 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
         const friendly =
           "Не настроен LINEAR_TEAM_ID.\n\n" +
           "Сделай одно из двух:\n" +
-          "1) Добавь GitHub Actions variable LINEAR_TEAM_ID\n" +
-          "2) Или узнай team_id через Linear и вставь его\n\n" +
-          "Подсказка: я могу вывести список команд через инструмент, но в рантайме мы не выбираем автоматически.";
+          "1) Выполни /admin linear teams и выбери UUID\n" +
+          "2) Добавь GitHub Actions variable LINEAR_TEAM_ID\n\n" +
+          "После деплоя бот начнёт использовать эту команду.";
 
         await finishApplyAttempt(env, attemptId, { ok: false }, "LINEAR_TEAM_ID not set");
         await tgCall(env, "sendMessage", { chat_id: chatId, text: friendly });
         return;
       }
 
-      // Stage -> won in Attio (reuse deal.stage update)
-      // We intentionally use the canonical stage name from bot.deal_stages.
       const wonStage = await resolveStageName(env, "выиграно");
       if (!wonStage) throw new Error("Stage 'Выиграно' is missing in bot.deal_stages");
       await applyDealStage(env, cb.from.id, draftDbId, dealId, wonStage.stage_name);
@@ -773,7 +818,6 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
       const kickoff = await ensureLinearKickoff(env, cb.from.id, draftDbId, dealId, teamId);
 
       await client.schema(sch).from("drafts").update({ status: "APPLIED" } as any).eq("id", draftDbId);
-
       await finishApplyAttempt(env, attemptId, { ok: true, kickoff }, null);
 
       await tgCall(env, "sendMessage", {
@@ -790,7 +834,7 @@ async function handleCallback(env: Env, cb: NonNullable<TelegramUpdate["callback
 
     await tgCall(env, "sendMessage", {
       chat_id: chatId,
-      text: `Apply для типа ${(first?.type ?? "unknown")} пока не реализован.`,
+      text: `Apply для типа ${(first?.type ?? "unknown") as string} пока не реализован.`,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
