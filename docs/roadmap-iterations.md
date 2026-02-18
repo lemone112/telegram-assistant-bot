@@ -507,137 +507,334 @@ No-op:
 
 ## Iteration 6 (P1) — Linear kickoff (`/deal won` creates 12 issues, idempotent)
 
+**Goal:** automate Design Studio kickoff in Linear with *zero duplicates* and clear UX.
+
+### Why this iteration is critical
+
+- Users will click Apply multiple times.
+- Linear APIs will rate-limit.
+- Partial progress is the norm (3/12 created then failure).
+
+If we don’t design this as per-unit idempotent, the workspace will fill with junk issues.
+
 ### Dependencies
 
-- Iteration 1 ledger + bulk gate
+- Iteration 1:
+  - ledger-backed idempotency
+  - retry/backoff
+  - bulk gate
+- Iteration 2:
+  - Draft/Result rendering
+- Iteration 4:
+  - deal resolution (deal_id must be stable)
 
-### Deliverables (detailed)
+### Scope
 
-- Draft shows:
-  - 12 issues to create
+- Intent: “deal won kickoff” (from slash or free-form later)
+- Draft preview:
+  - 12 tasks list (titles)
   - bulk warning + extra confirm
+  - target Linear team
 - Apply:
-  - creates issues idempotently by deterministic keys
-  - stores mapping deal → issue ids
+  - creates missing issues only
+  - persists mapping `attio:deal:*` → `[linear:issue:*]`
+  - returns Result with links
 
-### Acceptance tests
+### Design (detailed)
 
-- Kickoff Draft always shows bulk warning + extra confirm.
-- Apply creates 12 issues; ledger stores all issue ids.
-- Apply replay: repeating Apply returns same 12 ids, does not create duplicates.
-- Partial failure: if 3/12 issues created then upstream fails, rerun completes remaining without duplicating existing (per-template-task idempotency).
-- Team misconfig: missing LINEAR_TEAM_ID → CONFIG error with admin guidance.
-- Rate limit: 429 mid-creation → retry completes without duplicates.
+#### 1) Template task identity
+
+Every kickoff task must have a stable `template_task_key`.
+
+- Store keys in DB table (already present): `bot.project_template_tasks`
+- Issue idempotency key must include:
+  - `deal_id`
+  - `template_task_key`
+
+Example:
+
+- `linear:create_issue:<attio_deal_id>:<template_task_key>`
+
+#### 2) Bulk confirmation UX
+
+Draft must show:
+
+- `⚠️ This will create 12 issues`
+- buttons:
+  - `✅ Apply (confirm)`
+  - `❌ Cancel`
+  - `🔎 Details`
+
+#### 3) Apply execution strategy (resume-safe)
+
+- For each template task:
+  - attempt `runIdempotentOperation(key, create_issue)`
+  - store `issue_id` in ledger result
+- After loop:
+  - persist mapping deal → issue_ids (also ledger stores it)
+- If apply fails mid-way:
+  - next apply resumes where it left off (because keys are per-task)
+
+#### 4) Linear configuration gates
+
+- `LINEAR_TEAM_ID` must exist (CONFIG error if missing)
+- If multiple teams are possible later, require `/admin linear teams` to set one
+
+#### 5) Output
+
+Result message must include:
+
+- count created vs already existed
+- links to created issues (paginated if needed)
+
+### Acceptance tests (max)
+
+- Draft always shows bulk warning and requires extra confirm.
+- Apply creates exactly 12 issues once; replay returns same ids.
+- Partial failure 3/12 then retry completes 9 remaining without duplicates.
+- 429 mid-run → retry/backoff completes safely.
+- Missing LINEAR_TEAM_ID → CONFIG error with next steps.
+
+### DoD
+
+- Workspace never gets duplicates from this flow.
 
 ---
 
 ## Iteration 7 (P1) — Admin & ops completeness
 
-### Deliverables (detailed)
+**Goal:** no manual DB edits; fast recovery; safe operations.
 
-- `/admin env check`
-- `/admin linear teams`
-- `/admin audits last`
-- `/admin draft <id>` inspect
-- Clear guidance for recovery paths
+### Dependencies
 
-### Acceptance tests
+- Iteration 1 observability + error taxonomy
 
-- `/admin env check` lists missing env vars and shows which features are blocked.
-- `/admin linear teams` returns list and confirms selected team id.
-- `/admin audits last` shows last N apply attempts with external ids.
-- `/admin draft <id>` can inspect a draft and its apply attempts.
-- Admin commands are access-controlled (non-admin users cannot call them).
+### Scope
+
+Admin features must be:
+
+- access controlled
+- safe (no destructive ops in prod)
+- actionable (show what is wrong and how to fix)
+
+### Commands (detailed)
+
+#### `/admin env check`
+
+- Validates required env vars:
+  - Telegram
+  - Supabase
+  - Composio
+  - Linear team id
+  - STT provider (later)
+- Output:
+  - ✅ present
+  - ❌ missing
+  - which features are blocked
+
+#### `/admin linear teams`
+
+- Lists available teams (or configured allowlist)
+- Allows setting `LINEAR_TEAM_ID` safely
+
+#### `/admin audits last`
+
+- Shows last N apply attempts:
+  - draft id
+  - user
+  - outcomes summary
+  - external ids
+
+#### `/admin draft <id>`
+
+- Inspect draft:
+  - status
+  - payload
+  - apply attempts
+  - idempotency keys
+
+### Safety constraints
+
+- Admin commands must not leak secrets.
+- Must be rate-limited.
+
+### Acceptance tests (max)
+
+- Non-admin cannot call admin commands.
+- Env check correctly reports missing variables.
+- Audit list shows meaningful external ids.
 
 ### DoD
 
-- No manual DB edits in day-to-day ops.
+- Day-to-day ops can be performed via admin commands only.
 
 ---
 
 ## Iteration 8 (P1/P2) — Production hardening & test matrix
 
-### Feature freeze rule
-
-- Before starting Iteration 8, declare **feature freeze** for v1 scope (only bugfixes allowed).
-
-### Deliverables (detailed)
-
-- Automated regression for NS1–NS5
-- Load sanity (double-click storms)
-- Monitoring docs
-
-### Acceptance tests
-
-- NS1–NS5 scripted run passes in staging and production.
-- Load storm: 50 duplicate callbacks within 5 seconds → only one side-effect.
-- Degradation matrix behaviors are verified for Supabase/Composio/LightRAG down.
-- Error budget check: user-visible failure rate <2% over a test window.
-
-### DoD
-
-- Scripted acceptance session passes.
-
----
-
-# Iterations (post-v1 → GA)
-
-## Iteration 9 (P0) — LightRAG integration (read-only, grounded, ACL)
+**Goal:** stability under real conditions.
 
 ### Dependencies
 
-- LightRAG server meets `docs/lightrag-db-requirements.md`.
+- Iterations 1–7 implemented.
+
+### Feature freeze rule
+
+- Declare **feature freeze** for v1 scope.
+- Only bugfix PRs allowed.
 
 ### Deliverables (detailed)
 
-- `brief(entity)` with citations
-- `ask(question)` with citations
-- ACL propagation + server-side filtering
-- Entity linking loop: ambiguous → pick → persist confirmed mapping
-- Degradation path: LightRAG down → clear message, fallback to non-RAG data
+#### 1) Automated regression suite
 
-### Acceptance tests
+- Scripted tests for NS1–NS5
+- Includes:
+  - retries
+  - replay
+  - concurrency
+  - list ownership
 
-- `brief` returns summary + 3–5 citations with stable source URLs.
-- `ask` refuses to answer without citations (returns insufficient evidence).
-- ACL: user without support tag cannot retrieve Chatwoot citations.
-- Entity linking: ambiguous company/deal prompts Pick; confirmed mapping persists and is reused next time.
-- LightRAG down: bot shows degradation message and continues with non-RAG flows.
-- Injection resistance: prompt injection in retrieved chat text does not bypass citations/allowlists.
+#### 2) Load sanity
+
+- click-storm tests:
+  - 50 duplicate callbacks within 5 seconds
+
+#### 3) Degradation verification
+
+- Validate degradation matrix:
+  - Supabase down
+  - Composio down
+  - Linear down
+  - Attio down
+  - LightRAG down (post-v1 readiness)
+
+#### 4) Error budget check
+
+- user-visible failure rate <2% under controlled test window
+
+### Acceptance tests (max)
+
+- NS1–NS5 scripted run passes.
+- Degradation behaviors match matrix.
+
+### DoD
+
+- Release can be performed with confidence.
+
+---
+
+## Iteration 9 (P0) — LightRAG integration (read-only, grounded, ACL)
+
+**Goal:** connect the LightRAG server as product memory with grounded answers and correct ACL.
+
+### Dependencies
+
+- LightRAG meets `docs/lightrag-db-requirements.md`.
+- Bot has Pick list UX (Iteration 2) and mapping persistence.
+
+### Scope
+
+- Read-only only (no side-effects)
+- Features:
+  - `brief(entity)`
+  - `ask(question)`
+- Must return citations (mandatory)
+- Must enforce ACL server-side
+
+### Design (detailed)
+
+#### 1) API contract assumptions
+
+LightRAG must support:
+
+- `/search` with filters
+- `/answer` with citations
+- `/brief` with citations
+
+Bot must send:
+
+- tenant id
+- ACL tags/role
+- entity refs when possible
+
+#### 2) Grounding enforcement
+
+- If citations are empty:
+  - return “not found / insufficient evidence”
+  - do not hallucinate
+
+#### 3) Entity linking loop
+
+- If query ambiguous:
+  - use candidates from LightRAG or local search
+  - show Pick list
+- On Pick:
+  - persist confirmed mapping (either in LightRAG DB or in bot DB)
+
+#### 4) Prompt injection resistance
+
+- Never allow retrieved text to change tool allowlists or bypass policies.
+- Treat retrieved content as untrusted.
+
+### Acceptance tests (max)
+
+- brief returns 3–5 citations with stable URLs.
+- ask refuses to answer without citations.
+- ACL: sales cannot see support-only Chatwoot snippets.
+- LightRAG down: “Knowledge temporarily unavailable” and continue non-RAG flows.
+
+### DoD
+
+- Grounded answers are reliable.
 
 ---
 
 ## Iteration 10 (P0) — Entity graph navigator
 
+**Goal:** a single, navigable view across Attio/Linear/Chatwoot/LightRAG.
+
 ### Dependencies
 
-- Iteration 1 (ledger + allowlists)
-- Iteration 2 (pagination/pick UX)
+- Iteration 9 LightRAG brief + citations
+- Iteration 4 deal resolver
+- Mapping persistence
 
-### Acceptance tests
+### Scope
 
-- `/menu` → Deals → Pick deal → `Everything` view renders 4 sections: Attio, Linear, Chatwoot, LightRAG.
-- If a deal has 0 linked Chatwoot threads, UI shows `No conversations found` (not empty/failed).
-- Clicking a linked Linear issue opens a Card with a stable URL.
-- If entity mapping is ambiguous, user must Pick before `Everything` is rendered.
-- ACL: a user without `team:support` cannot see Chatwoot snippets/links even if other sections load.
+- New UX view: `Everything`
+- Sections:
+  - Attio: deal/company/person card
+  - Linear: linked issues/projects
+  - Chatwoot: linked conversations
+  - LightRAG: brief + top citations
+
+### Design (detailed)
+
+#### 1) Data assembly
+
+- Resolve canonical entity (deal/company)
+- Fetch linked objects:
+  - mapping tables
+  - LightRAG search by entity_ref
+
+#### 2) Empty states
+
+- Each section must have a meaningful empty state, not a blank error.
+
+#### 3) ACL constraints
+
+- Even if other sections render, restricted content must be hidden.
+
+### Acceptance tests (max)
+
+- `/menu` → Deals → Pick deal → Everything view renders 4 sections.
+- No conversations found shows empty state.
+- Restricted users cannot see Chatwoot content.
 
 ### DoD
 
-- Feature is accessible from `/menu` hub (when relevant)
-- All mutations are Draft-gated and idempotent
+- Users can navigate context without switching apps.
 
-### Pitfalls
-
-- If mapping is missing, must use Pick list + persist confirmed mapping
-- Avoid wall-of-text; paginate
-
-### Deliverables (detailed)
-
-- Unified "everything" view with tabs/sections
-- Persisted confirmed mappings
-
----
 
 ## Iteration 11 (P0) — Action items extraction (Chatwoot → Draft tasks)
 
