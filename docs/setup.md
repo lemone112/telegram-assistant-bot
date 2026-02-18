@@ -10,12 +10,15 @@ Add these in: GitHub → Settings → Secrets and variables → Actions.
 - `TELEGRAM_BOT_TOKEN`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
+- `COMPOSIO_API_KEY`
 
 ### Variables (recommended)
 - `CF_WORKER_NAME` (default: `telegram-assistant-bot`)
 - `SUPABASE_SCHEMA` (default: `bot`)
+- `SUPABASE_PROJECT_REF` (example: `igobxicuyfzkpoekamwt`)
 - `PAUSE_REMINDER_DAYS` (default: `7`)
 - `BOT_ALLOWED_TELEGRAM_USER_IDS` (comma-separated telegram user IDs)
+- `LINEAR_TEAM_ID` (example: `9bb39310-30fb-49d4-936f-041f7c83b494`)
 
 ## 2) Cloudflare Worker
 
@@ -31,7 +34,7 @@ After deploy, set bot webhook to:
 
 - `https://<worker-subdomain>.workers.dev/telegram/webhook`
 
-Use Bot API `setWebhook` or BotFather instructions.
+Use Bot API `setWebhook`.
 
 ## 4) Supabase
 
@@ -39,16 +42,17 @@ Apply migrations in `supabase/migrations/*`.
 
 Important:
 - tables are created under schema `bot`
-- PostgREST schema cache may not expose `bot.*` by default; server-side SQL works fine
+- if PostgREST schema cache does not expose `bot.*`, server-side SQL still works
 
-## 5) Notes about Composio execution
+## 5) Composio execution
 
-The worker implementation executes Attio/Linear actions via Composio-connected toolkits.
+The worker executes Attio/Linear actions using Composio.
 
-Implementation notes:
-- Keep all mutating operations behind Draft → Apply.
-- Enforce idempotency at two layers:
-  - Draft apply idempotency: `(draft_id, callback_query_id)`
-  - Domain idempotency:
-    - one Linear project per Attio deal: `bot.deal_linear_links.attio_deal_id` PK
-    - one template task per project: `(linear_project_id, template_task_key)` PK
+Minimal requirements:
+- `COMPOSIO_API_KEY` as a secret
+- each operation is executed only after Draft → Apply
+
+Idempotency policy:
+- Draft apply: `(draft_id, callback_query_id)`
+- One Linear project per Attio deal: `bot.deal_linear_links.attio_deal_id` PK
+- One template task per Linear project: `(linear_project_id, template_task_key)` PK
