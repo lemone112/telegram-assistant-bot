@@ -1,75 +1,51 @@
-# Supabase: схема БД (план)
+# Supabase: схема БД (актуально после reset A)
 
-Требование: можно «полностью очистить и перестроить». Лимит объёма: **500MB**.
+В этом проекте выбран вариант **A**: "полностью очистить `public` и перестроить".
 
-## 1) Принципы
+> Важно: reset — разрушительное действие. В миграции **не удаляются functions** в `public`, потому что некоторые из них принадлежат extensions (например `vector`).
 
-- Храним только то, что нужно для восстановления истории действий.
-- Не храним большие бинарные вложения.
-- Тексты ограничиваем по длине.
-- Включаем TTL/очистку.
+## Список таблиц (public)
 
-## 2) Таблицы (предлагаемая модель)
+- `telegram_users`
+- `drafts`
+- `draft_apply_attempts`
+- `external_links`
+- `audit_log`
 
-### 2.1 `telegram_users`
-- `id` (pk)
-- `telegram_user_id` (unique)
-- `username`
-- `first_name`, `last_name`
-- `language_code`
-- `created_at`
-- `updated_at`
+## Таблица `telegram_users`
 
-### 2.2 `drafts`
-- `id` (pk, uuid/ulid)
-- `telegram_user_id` (fk)
-- `chat_id`
-- `source_type` (`text|voice`)
-- `source_text` (bounded)
-- `transcript` (bounded)
-- `intent_summary` (bounded)
-- `status` (`DRAFT|APPLIED|CANCELLED|EXPIRED`)
-- `assumptions` (jsonb)
-- `risks` (jsonb)
-- `questions` (jsonb)
-- `actions` (jsonb) — нормализованный список действий
-- `created_at`
-- `expires_at`
+- `id` uuid pk
+- `telegram_user_id` bigint unique
+- базовые поля профиля
 
-### 2.3 `draft_apply_attempts`
-- `id` (pk)
-- `draft_id` (fk)
-- `callback_query_id` (unique per draft)
-- `started_at`
-- `finished_at`
-- `result` (jsonb) — per-action outcomes
-- `error_summary` (text, bounded)
+## Таблица `drafts`
 
-### 2.4 `external_links`
-Хранит связывание сущностей между системами.
-- `id`
-- `draft_id`
-- `system` (`attio|linear`)
-- `entity_type` (например `person|company|deal|issue`)
-- `entity_id`
-- `entity_url`
-- `created_at`
+- хранит Draft (черновик) + jsonb `actions`, `assumptions`, `risks`, `questions`
+- `status`: DRAFT/APPLIED/CANCELLED/EXPIRED
 
-### 2.5 `audit_log`
-- минимальный лог действий бота
+## Таблица `draft_apply_attempts`
 
-## 3) Очистка
+- фиксирует идемпотентные попытки apply
+- уникальность `(draft_id, callback_query_id)`
 
-- cron/worker job: удалять старые `audit_log` и `draft_apply_attempts` старше N дней.
-- `drafts` старше TTL → `EXPIRED`.
+## Таблица `external_links`
 
-## 4) Миграции
+- связывает Draft с созданными сущностями в Attio/Linear
 
-Все изменения схемы фиксируем SQL-миграциями в репозитории:
+## Таблица `audit_log`
 
-- `supabase/migrations/*.sql`
+- минимальный audit trail
 
-## 5) RLS
+## Ограничение 500MB
 
-На раннем этапе можно использовать service_role ключ внутри Worker.
-Позже — включить RLS и ограничить доступ.
+Рекомендации:
+
+- ограничивать длину `source_text`/`transcript`
+- чистить старые Draft/attempts/log по TTL
+- не хранить вложения
+
+## Миграция
+
+См. файл:
+
+- `supabase/migrations/0001_reset_public_and_create_bot_schema.sql`
