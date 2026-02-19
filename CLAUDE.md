@@ -30,6 +30,8 @@
 
 ## Technical Decisions
 
+- **Язык: TypeScript only** — весь новый код (бот + постепенная миграция dashboard) на TS
+- **Монорепо:** бот живёт в `labpics-dashboard/telegram-bot/` (см. `docs/monorepo-migration.md`)
 - STT: OpenAI Whisper (`whisper-1`)
 - Runtime: **Docker-контейнер рядом с labpics-dashboard** (Node.js + Fastify)
 - DB: **Shared PostgreSQL** (`labpics`) — dashboard таблицы (read) + `bot` schema (read-write)
