@@ -1,5 +1,5 @@
 import type { NormalizedError } from "./safety/types";
-import { db, getSetting, upsertSetting } from "./supabase";
+import { db } from "./supabase";
 
 type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -12,41 +12,45 @@ type Env = {
   BOT_ALLOWED_TELEGRAM_USER_IDS?: string;
 };
 
+type TelegramUser = {
+  id: number;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+  language_code?: string;
+};
+
+type TelegramChat = { id: number; type: string; title?: string; username?: string };
+
+type TelegramMessage = {
+  message_id: number;
+  date: number;
+  text?: string;
+  chat: TelegramChat;
+  from?: TelegramUser;
+};
+
+type TelegramCallbackQuery = {
+  id: string;
+  from: TelegramUser;
+  message?: { message_id: number; chat: TelegramChat };
+  data?: string;
+};
+
 type TelegramUpdate = {
   update_id: number;
-  message?: {
-    message_id: number;
-    date: number;
-    text?: string;
-    chat: { id: number; type: string; title?: string; username?: string };
-    from?: {
-      id: number;
-      username?: string;
-      first_name?: string;
-      last_name?: string;
-      language_code?: string;
-    };
-  };
-  callback_query?: {
-    id: string;
-    from: {
-      id: number;
-      username?: string;
-      first_name?: string;
-      last_name?: string;
-      language_code?: string;
-    };
-    message?: { message_id: number; chat: { id: number } };
-    data?: string;
-  };
+  message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 };
 
 type TelegramApiResponse<T> =
   | { ok: true; result: T }
   | { ok: false; description?: string; error_code?: number };
 
+type InlineKeyboardButton = { text: string; callback_data: string };
+
 type InlineKeyboardMarkup = {
-  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+  inline_keyboard: Array<Array<InlineKeyboardButton>>;
 };
 
 function json(body: unknown, status = 200): Response {
@@ -171,7 +175,7 @@ function menuKeyboard(): InlineKeyboardMarkup {
   };
 }
 
-function sysNavRow(): Array<{ text: string; callback_data: string }> {
+function sysNavRow(): InlineKeyboardButton[] {
   return [
     { text: "Menu", callback_data: "v1:SYS:MENU" },
     { text: "Cancel", callback_data: "v1:SYS:CANCEL" },
@@ -221,7 +225,7 @@ async function showNoAccess(env: Env, chatId: number) {
   });
 }
 
-async function ensureTelegramUser(env: Env, tgUser: TelegramUpdate["message"]["from"], chatId: number) {
+async function ensureTelegramUser(env: Env, tgUser: TelegramUser | undefined) {
   if (!tgUser) return null;
   try {
     const { data } = await db(env)
@@ -247,7 +251,7 @@ async function ensureTelegramUser(env: Env, tgUser: TelegramUpdate["message"]["f
 }
 
 async function showMenu(env: Env, chatId: number) {
-  const body = ["Assistant", "", "Choose an action:"].join("\n");
+  const body = ["Assistant", "", "Choose an action:"] .join("\n");
   await tgSendMessage(env, chatId, body, menuKeyboard());
 }
 
@@ -295,7 +299,7 @@ function draftKeyboard(draftId: string): InlineKeyboardMarkup {
         { text: "Apply", callback_data: `v1:D:A:${draftId}` },
         { text: "Cancel", callback_data: `v1:D:C:${draftId}` },
       ],
-      [sysNavRow()],
+      sysNavRow(),
     ],
   };
 }
@@ -324,12 +328,10 @@ async function cancelDraft(env: Env, draftId: string) {
 }
 
 async function applyDraftStub(env: Env, draftId: string) {
-  // coarse idempotency for Iteration 1
   const applyKey = `draft:${draftId}:apply`;
   const ok = await insertIdempotencyKey(env, applyKey, draftId);
   if (!ok) return { alreadyApplied: true };
 
-  // observability (best-effort)
   try {
     await db(env).from("draft_apply_attempts").insert({
       draft_id: draftId,
@@ -366,13 +368,9 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
     return;
   }
 
-  // callback idempotency
   const cbKey = `tg:callback:${cq.id}`;
   const firstTime = await insertIdempotencyKey(env, cbKey, null);
-  if (!firstTime) {
-    // already handled
-    return;
-  }
+  if (!firstTime) return;
 
   const parts = safeParseCallbackData(cq.data);
   if (!parts) {
@@ -380,7 +378,6 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
     return;
   }
 
-  // v1:<OP>...
   const op = parts[1];
 
   if (op === "SYS") {
@@ -462,10 +459,7 @@ async function handleMessage(env: Env, update: TelegramUpdate) {
     return;
   }
 
-  // record user (best-effort)
-  await ensureTelegramUser(env, from, chatId);
-
-  // UI-first: any text shows menu
+  await ensureTelegramUser(env, from);
   await showMenu(env, chatId);
 }
 
@@ -485,7 +479,6 @@ export default {
       return json({ ok: false, error: "invalid json" }, 400);
     }
 
-    // Never crash the webhook: respond 200 by default.
     try {
       if (update.callback_query) {
         await handleCallback(env, update);
@@ -497,12 +490,7 @@ export default {
     } catch (e) {
       const err = normalizeError(e);
 
-      // Best effort: respond to the user if we can determine chat_id.
-      const chatId =
-        update.message?.chat.id ??
-        update.callback_query?.message?.chat.id ??
-        null;
-
+      const chatId = update.message?.chat.id ?? update.callback_query?.message?.chat.id ?? null;
       const fromId = update.message?.from?.id ?? update.callback_query?.from?.id ?? null;
       const allowed = fromId ? isAllowed(env, fromId) : false;
 
@@ -526,7 +514,6 @@ export default {
         }
       }
 
-      // By default return 200 to avoid platform retries.
       return json({ ok: true, error: err.code });
     }
   },
