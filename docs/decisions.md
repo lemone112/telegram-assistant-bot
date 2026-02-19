@@ -107,30 +107,32 @@ This document records **project-level decisions** that are not explicitly specif
 
 ---
 
-## D-005 — Idempotency ledger policy (write ordering)
+## D-005 — Idempotency ledger policy (reservation + finalize)
 
 ### Decision
 
-- The bot’s idempotency gate is stored in `bot.idempotency_keys`.
-- The idempotency key MUST NOT be persisted until **all preconditions** are validated.
+- The bot must protect all side-effect operations with **reservation-based idempotency**.
 
 ### Policy
 
-- For any side-effect Apply flow, ordering must be:
-  1. parse + validate input
-  2. validate config
-  3. validate authorization
-  4. (optional) best-effort attempt logging
-  5. execute business side-effects
-  6. persist idempotency key
+- If we only have a simple gate table (like `bot.idempotency_keys`), we must treat it as a **reservation**:
+  1. validate preconditions (input/config/auth)
+  2. reserve key (insert) **before** side effects
+  3. execute business side effects
+  4. record outcome elsewhere (attempt log / audit log / result mapping)
 
-### Rationale
+> A simple gate table cannot represent `failed` vs `succeeded`; therefore step (4) is required for diagnosis.
 
-- Prevents the “key recorded, business action not executed” failure mode.
+### Preferred future upgrade
 
-### Future (optional)
+- Upgrade idempotency to a true ledger table with:
+  - status: `in_progress|succeeded|failed`
+  - result payload / external ids
+  - timestamps
 
-- Upgrade `bot.idempotency_keys` into a full ledger with status (`in_progress|succeeded|failed`) if needed.
+This enables:
+- safe crash recovery
+- preventing duplicates even when the handler crashes after side effects
 
 ---
 
