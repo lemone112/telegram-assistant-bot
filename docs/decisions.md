@@ -80,3 +80,82 @@ This document records **project-level decisions** that are not explicitly specif
 - Entity Graph Navigator (Iteration 10) MUST build from Link Registry first.
 
 ---
+
+## D-004 — Telegram webhook perimeter security
+
+### Decision
+
+- In production, the bot **must** verify Telegram webhook authenticity using the header:
+  - `X-Telegram-Bot-Api-Secret-Token`
+
+### Configuration
+
+- Env var: `TELEGRAM_WEBHOOK_SECRET_TOKEN`
+
+### Policy
+
+- If `TELEGRAM_WEBHOOK_SECRET_TOKEN` is missing in production:
+  - reject all webhook requests (treat as misconfiguration)
+- If the request header is missing or mismatched:
+  - return HTTP 401/403
+  - do not process the update (no Draft/Apply)
+
+### Rationale
+
+- Prevents forged requests against the webhook endpoint.
+- Reduces blast radius of service-role DB usage.
+
+---
+
+## D-005 — Idempotency ledger policy (write ordering)
+
+### Decision
+
+- The bot’s idempotency gate is stored in `bot.idempotency_keys`.
+- The idempotency key MUST NOT be persisted until **all preconditions** are validated.
+
+### Policy
+
+- For any side-effect Apply flow, ordering must be:
+  1. parse + validate input
+  2. validate config
+  3. validate authorization
+  4. (optional) best-effort attempt logging
+  5. execute business side-effects
+  6. persist idempotency key
+
+### Rationale
+
+- Prevents the “key recorded, business action not executed” failure mode.
+
+### Future (optional)
+
+- Upgrade `bot.idempotency_keys` into a full ledger with status (`in_progress|succeeded|failed`) if needed.
+
+---
+
+## D-006 — Outbound call policy (timeouts, retries, and classification)
+
+### Decision
+
+All outbound calls (Composio, Linear, Attio, Chatwoot, LightRAG) must follow a unified policy.
+
+### Policy
+
+- **Timeouts:** every outbound call must have a hard timeout (AbortController).
+- **Retries:** only retry on:
+  - HTTP 429
+  - transient 5xx
+- **Retry budget:** must be bounded (max attempts) and use exponential backoff + jitter.
+- **Classification:** errors must be normalized into bot error taxonomy:
+  - `RATE_LIMITED` (429)
+  - `DEPENDENCY_DOWN` (timeouts / 5xx)
+  - `CONFIG_MISSING` / `FORBIDDEN` (401/403 depending on context)
+
+### Rationale
+
+- Prevents hanging webhook handlers.
+- Makes degradation predictable.
+- Preserves idempotency under retries.
+
+---
