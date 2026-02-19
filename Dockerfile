@@ -16,5 +16,5 @@ RUN npx tsc --noEmit
 
 EXPOSE 3000
 
-# Run with tsx (TypeScript loader for Node.js)
-CMD ["npx", "tsx", "src/server.ts"]
+# In Docker, env vars come from docker-compose env_file — no --env-file needed
+CMD ["node", "--import", "tsx/esm", "src/server.ts"]
