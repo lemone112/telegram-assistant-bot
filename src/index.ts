@@ -1,16 +1,14 @@
 import type { NormalizedError } from "./safety/types";
-import { db, getSetting, upsertSetting } from "./supabase";
+import { getConfig } from "./config";
+import {
+  botQuery,
+  botQueryOne,
+  getSetting,
+  upsertSetting,
+  insertIdempotencyKey,
+} from "./db";
 
-type Env = {
-  TELEGRAM_BOT_TOKEN: string;
-  SUPABASE_URL: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
-  COMPOSIO_API_KEY: string;
-
-  // vars
-  SUPABASE_SCHEMA?: string;
-  BOT_ALLOWED_TELEGRAM_USER_IDS?: string;
-};
+// ─── Telegram types ─────────────────────────────────────────────
 
 type TelegramUser = {
   id: number;
@@ -37,7 +35,7 @@ type TelegramCallbackQuery = {
   data?: string;
 };
 
-type TelegramUpdate = {
+export type TelegramUpdate = {
   update_id: number;
   message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
@@ -58,26 +56,14 @@ type Profile = {
   attio_workspace_member_id: string | null;
 };
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
-}
-
-function text(body: string, status = 200): Response {
-  return new Response(body, {
-    status,
-    headers: { "content-type": "text/plain; charset=utf-8" },
-  });
-}
+// ─── Helpers ────────────────────────────────────────────────────
 
 function nowIso(): string {
   return new Date().toISOString();
 }
 
-function getAllowedUserSet(env: Env): Set<number> | null {
-  const raw = env.BOT_ALLOWED_TELEGRAM_USER_IDS?.trim();
+function getAllowedUserSet(): Set<number> | null {
+  const raw = getConfig().BOT_ALLOWED_TELEGRAM_USER_IDS?.trim();
   if (!raw) return null;
   const ids = raw
     .split(",")
@@ -88,64 +74,13 @@ function getAllowedUserSet(env: Env): Set<number> | null {
   return new Set(ids);
 }
 
-function isAllowed(env: Env, telegramUserId: number): boolean {
-  const allowed = getAllowedUserSet(env);
-  if (!allowed) return false; // default deny
+function isAllowed(telegramUserId: number): boolean {
+  const allowed = getAllowedUserSet();
+  if (!allowed) return false;
   return allowed.has(telegramUserId);
 }
 
-function requireEnv(env: Env, key: keyof Env): string {
-  const v = env[key];
-  if (!v || typeof v !== "string") throw new Error(`Missing env: ${String(key)}`);
-  return v;
-}
-
-async function tgCall<T>(
-  env: Env,
-  method: string,
-  payload: Record<string, unknown>
-): Promise<T> {
-  const url = `https://api.telegram.org/bot${requireEnv(env, "TELEGRAM_BOT_TOKEN")}/${method}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  const data = (await res.json().catch(() => ({}))) as TelegramApiResponse<T> | Record<string, unknown>;
-  const okFlag = (data as any)?.ok;
-  if (!res.ok || okFlag === false) {
-    throw new Error(`Telegram API error: ${res.status} ${JSON.stringify(data)}`);
-  }
-  if (okFlag === true && (data as any).result !== undefined) return (data as any).result as T;
-  return data as unknown as T;
-}
-
-async function tgSendMessage(
-  env: Env,
-  chatId: number,
-  text: string,
-  replyMarkup?: InlineKeyboardMarkup
-) {
-  return tgCall(env, "sendMessage", {
-    chat_id: chatId,
-    text,
-    reply_markup: replyMarkup,
-    disable_web_page_preview: true,
-  });
-}
-
-async function tgAnswerCallbackQuery(env: Env, callbackQueryId: string) {
-  try {
-    await tgCall(env, "answerCallbackQuery", {
-      callback_query_id: callbackQueryId,
-    });
-  } catch {
-    // ignore
-  }
-}
-
-function normalizeError(e: unknown): NormalizedError {
+export function normalizeError(e: unknown): NormalizedError {
   if (e instanceof Error) {
     return {
       category: "UNKNOWN",
@@ -162,6 +97,53 @@ function normalizeError(e: unknown): NormalizedError {
     retryable: false,
   };
 }
+
+// ─── Telegram API ───────────────────────────────────────────────
+
+async function tgCall<T>(method: string, payload: Record<string, unknown>): Promise<T> {
+  const token = getConfig().TELEGRAM_BOT_TOKEN;
+  const url = `https://api.telegram.org/bot${token}/${method}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const data = (await res.json().catch(() => ({}))) as
+    | TelegramApiResponse<T>
+    | Record<string, unknown>;
+  const okFlag = (data as any)?.ok;
+  if (!res.ok || okFlag === false) {
+    throw new Error(`Telegram API error: ${res.status} ${JSON.stringify(data)}`);
+  }
+  if (okFlag === true && (data as any).result !== undefined) return (data as any).result as T;
+  return data as unknown as T;
+}
+
+async function tgSendMessage(
+  chatId: number,
+  text: string,
+  replyMarkup?: InlineKeyboardMarkup,
+) {
+  return tgCall("sendMessage", {
+    chat_id: chatId,
+    text,
+    reply_markup: replyMarkup,
+    disable_web_page_preview: true,
+  });
+}
+
+async function tgAnswerCallbackQuery(callbackQueryId: string) {
+  try {
+    await tgCall("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+    });
+  } catch {
+    // ignore
+  }
+}
+
+// ─── UI ─────────────────────────────────────────────────────────
 
 function menuKeyboard(): InlineKeyboardMarkup {
   return {
@@ -194,106 +176,112 @@ function safeParseCallbackData(raw: string | undefined): string[] | null {
   return parts;
 }
 
-async function bestEffortAudit(env: Env, draftId: string | null, eventType: string, payload: any) {
+// ─── DB operations ──────────────────────────────────────────────
+
+async function bestEffortAudit(
+  draftId: string | null,
+  eventType: string,
+  payload: unknown,
+) {
   try {
-    await db(env).from("audit_log").insert({
-      draft_id: draftId,
-      level: "info",
-      event_type: eventType,
-      message: null,
-      payload,
-      created_at: nowIso(),
-    } as any);
+    await botQuery(
+      `INSERT INTO bot.audit_log (draft_id, level, event_type, message, payload, created_at)
+       VALUES ($1, 'info', $2, NULL, $3::jsonb, $4)`,
+      [draftId, eventType, JSON.stringify(payload), nowIso()],
+    );
   } catch {
     // must never block
   }
 }
 
-async function insertIdempotencyKey(env: Env, key: string, draftId?: string | null): Promise<boolean> {
-  try {
-    const { error } = await db(env).from("idempotency_keys").insert({
-      key,
-      draft_id: draftId ?? null,
-      created_at: nowIso(),
-    } as any);
-    if (error) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function showNoAccess(env: Env, chatId: number) {
-  await tgSendMessage(env, chatId, "Нет доступа", {
+async function showNoAccess(chatId: number) {
+  await tgSendMessage(chatId, "Нет доступа", {
     inline_keyboard: [[{ text: "Help", callback_data: "v1:M:help" }]],
   });
 }
 
-async function ensureTelegramUser(env: Env, tgUser: TelegramUser | undefined) {
+async function ensureTelegramUser(tgUser: TelegramUser | undefined) {
   if (!tgUser) return null;
   try {
-    const { data } = await db(env)
-      .from("telegram_users")
-      .upsert(
-        {
-          telegram_user_id: tgUser.id,
-          username: tgUser.username ?? null,
-          first_name: tgUser.first_name ?? null,
-          last_name: tgUser.last_name ?? null,
-          language_code: tgUser.language_code ?? null,
-          updated_at: nowIso(),
-        } as any,
-        { onConflict: "telegram_user_id" } as any
-      )
-      .select("id")
-      .maybeSingle();
-
-    return (data as any)?.id ?? null;
+    const row = await botQueryOne<{ id: string }>(
+      `INSERT INTO bot.telegram_users
+         (telegram_user_id, username, first_name, last_name, language_code, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (telegram_user_id)
+       DO UPDATE SET
+         username = EXCLUDED.username,
+         first_name = EXCLUDED.first_name,
+         last_name = EXCLUDED.last_name,
+         language_code = EXCLUDED.language_code,
+         updated_at = EXCLUDED.updated_at
+       RETURNING id`,
+      [
+        tgUser.id,
+        tgUser.username ?? null,
+        tgUser.first_name ?? null,
+        tgUser.last_name ?? null,
+        tgUser.language_code ?? null,
+        nowIso(),
+      ],
+    );
+    return row?.id ?? null;
   } catch {
     return null;
   }
 }
 
-async function showMenu(env: Env, chatId: number) {
+async function showMenu(chatId: number) {
   const body = ["Assistant", "", "Choose an action:"].join("\n");
-  await tgSendMessage(env, chatId, body, menuKeyboard());
+  await tgSendMessage(chatId, body, menuKeyboard());
 }
 
-async function createStubDraft(env: Env, telegramUserPk: string | null, chatId: number, sourceText: string) {
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-  const draftRow: any = {
-    telegram_user_id: telegramUserPk,
-    chat_id: chatId,
-    source_type: "text",
-    source_text: sourceText,
-    transcript: null,
-    intent_summary: "Stub draft (Iteration 1)",
-    status: "DRAFT",
-    assumptions: [],
-    risks: [
-      {
-        kind: "missing_required",
-        details: "Iteration 1: business actions are stubbed; this draft is only to validate the platform.",
-      },
-    ],
-    questions: [],
-    actions: [
-      {
-        toolkit: "supabase",
-        tool_slug: "NOOP",
-        args: {},
-        read_only: false,
-        idempotency_scope: "draft:apply:stub",
-        preview: "No-op (platform validation)",
-      },
-    ],
-    created_at: nowIso(),
-    expires_at: expiresAt,
-  };
+// ─── Drafts ─────────────────────────────────────────────────────
 
-  const { data, error } = await db(env).from("drafts").insert(draftRow as any).select("id").maybeSingle();
-  if (error) throw new Error(`Failed to create draft: ${error.message}`);
-  return (data as any).id as string;
+async function createStubDraft(
+  telegramUserPk: string | null,
+  chatId: number,
+  sourceText: string,
+) {
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const actions = [
+    {
+      toolkit: "supabase",
+      tool_slug: "NOOP",
+      args: {},
+      read_only: false,
+      idempotency_scope: "draft:apply:stub",
+      preview: "No-op (platform validation)",
+    },
+  ];
+  const risks = [
+    {
+      kind: "missing_required",
+      details:
+        "Iteration 1: business actions are stubbed; this draft is only to validate the platform.",
+    },
+  ];
+
+  const row = await botQueryOne<{ id: string }>(
+    `INSERT INTO bot.drafts
+       (telegram_user_id, chat_id, source_type, source_text, transcript,
+        intent_summary, status, assumptions, risks, questions, actions,
+        created_at, expires_at)
+     VALUES ($1, $2, 'text', $3, NULL,
+        'Stub draft (Iteration 1)', 'DRAFT', '[]'::jsonb, $4::jsonb, '[]'::jsonb, $5::jsonb,
+        $6, $7)
+     RETURNING id`,
+    [
+      telegramUserPk,
+      chatId,
+      sourceText,
+      JSON.stringify(risks),
+      JSON.stringify(actions),
+      nowIso(),
+      expiresAt,
+    ],
+  );
+  if (!row) throw new Error("Failed to create draft");
+  return row.id;
 }
 
 function draftKeyboard(draftId: string): InlineKeyboardMarkup {
@@ -308,7 +296,7 @@ function draftKeyboard(draftId: string): InlineKeyboardMarkup {
   };
 }
 
-async function showDraftPreview(env: Env, chatId: number, draftId: string) {
+async function showDraftPreview(chatId: number, draftId: string) {
   const body = [
     `Draft #${draftId.slice(0, 8)}`,
     "",
@@ -321,41 +309,46 @@ async function showDraftPreview(env: Env, chatId: number, draftId: string) {
     "Risks:",
     "- Platform-only: no business actions yet",
   ].join("\n");
-  await tgSendMessage(env, chatId, body, draftKeyboard(draftId));
+  await tgSendMessage(chatId, body, draftKeyboard(draftId));
 }
 
-async function cancelDraft(env: Env, draftId: string) {
-  await db(env)
-    .from("drafts")
-    .update({ status: "CANCELLED", updated_at: nowIso() } as any)
-    .eq("id", draftId);
+async function cancelDraft(draftId: string) {
+  await botQuery(
+    "UPDATE bot.drafts SET status = 'CANCELLED', updated_at = $1 WHERE id = $2",
+    [nowIso(), draftId],
+  );
 }
 
-async function applyDraftStub(env: Env, draftId: string) {
+async function applyDraftStub(draftId: string) {
   const applyKey = `draft:${draftId}:apply`;
-  const ok = await insertIdempotencyKey(env, applyKey, draftId);
+  const ok = await insertIdempotencyKey(applyKey, draftId);
   if (!ok) return { alreadyApplied: true };
 
   try {
-    await db(env).from("draft_apply_attempts").insert({
-      draft_id: draftId,
-      idempotency_key: applyKey,
-      started_at: nowIso(),
-      finished_at: nowIso(),
-      result: { ok: true, note: "Iteration 1 stub apply" },
-      error_summary: null,
-    } as any);
+    await botQuery(
+      `INSERT INTO bot.draft_apply_attempts
+         (draft_id, idempotency_key, started_at, finished_at, result, error_summary)
+       VALUES ($1, $2, $3, $3, $4::jsonb, NULL)`,
+      [
+        draftId,
+        applyKey,
+        nowIso(),
+        JSON.stringify({ ok: true, note: "Iteration 1 stub apply" }),
+      ],
+    );
   } catch {
     // ignore
   }
 
-  await db(env)
-    .from("drafts")
-    .update({ status: "APPLIED", updated_at: nowIso() } as any)
-    .eq("id", draftId);
+  await botQuery(
+    "UPDATE bot.drafts SET status = 'APPLIED', updated_at = $1 WHERE id = $2",
+    [nowIso(), draftId],
+  );
 
   return { alreadyApplied: false };
 }
+
+// ─── Profile ────────────────────────────────────────────────────
 
 function profileKeys(tgUserId: number) {
   return {
@@ -364,11 +357,12 @@ function profileKeys(tgUserId: number) {
   };
 }
 
-async function loadProfile(env: Env, tgUserId: number): Promise<Profile> {
+async function loadProfile(tgUserId: number): Promise<Profile> {
   const keys = profileKeys(tgUserId);
-  const linear_user_id = (await getSetting<string>(env, keys.linearUserId).catch(() => null)) ?? null;
+  const linear_user_id =
+    (await getSetting<string>(keys.linearUserId).catch(() => null)) ?? null;
   const attio_workspace_member_id =
-    (await getSetting<string>(env, keys.attioWorkspaceMemberId).catch(() => null)) ?? null;
+    (await getSetting<string>(keys.attioWorkspaceMemberId).catch(() => null)) ?? null;
   return { linear_user_id, attio_workspace_member_id };
 }
 
@@ -388,6 +382,8 @@ function profileKeyboard(): InlineKeyboardMarkup {
   };
 }
 
+// ─── Pickers ────────────────────────────────────────────────────
+
 type PickerItem = { id: string; label: string; subtitle?: string };
 
 type PickerState = {
@@ -400,18 +396,18 @@ function pickerStateKey(tgUserId: number): string {
   return `picker:${tgUserId}:state`;
 }
 
-async function savePickerState(env: Env, tgUserId: number, state: PickerState) {
-  await upsertSetting(env, pickerStateKey(tgUserId), state);
+async function savePickerState(tgUserId: number, state: PickerState) {
+  await upsertSetting(pickerStateKey(tgUserId), state);
 }
 
-async function loadPickerState(env: Env, tgUserId: number): Promise<PickerState | null> {
-  return (await getSetting<PickerState>(env, pickerStateKey(tgUserId))) ?? null;
+async function loadPickerState(tgUserId: number): Promise<PickerState | null> {
+  return (await getSetting<PickerState>(pickerStateKey(tgUserId))) ?? null;
 }
 
 function renderPicker(
   title: string,
   state: PickerState,
-  onPickPrefix: string
+  onPickPrefix: string,
 ): { text: string; keyboard: InlineKeyboardMarkup } {
   const pageSize = 8;
   const start = (state.page - 1) * pageSize;
@@ -441,29 +437,32 @@ function renderPicker(
   };
 }
 
-async function showProfile(env: Env, chatId: number, tgUserId: number) {
-  const p = await loadProfile(env, tgUserId);
+async function showProfile(chatId: number, tgUserId: number) {
+  const p = await loadProfile(tgUserId);
   const body = [
     "Profile",
     "",
     `Linear user: ${p.linear_user_id ?? "(not set)"}`,
     `Attio member: ${p.attio_workspace_member_id ?? "(not set)"}`,
   ].join("\n");
-  await tgSendMessage(env, chatId, body, profileKeyboard());
+  await tgSendMessage(chatId, body, profileKeyboard());
 }
 
-async function buildLinearUserPicker(env: Env): Promise<PickerItem[]> {
-  // Use Linear cache table if present; otherwise fall back to empty.
-  // Iteration 2 will add proper cache refresh; for now we read existing cache or allow direct listing later.
+async function buildLinearUserPicker(): Promise<PickerItem[]> {
   try {
-    const { data } = await db(env)
-      .from("linear_users_cache")
-      .select("id,name,display_name,email,active")
-      .eq("active", true)
-      .order("name", { ascending: true })
-      .limit(250);
+    const rows = await botQuery<{
+      id: string;
+      name: string;
+      display_name: string | null;
+      email: string | null;
+    }>(
+      `SELECT id, name, display_name, email
+       FROM bot.linear_users_cache
+       WHERE active = true
+       ORDER BY name ASC
+       LIMIT 250`,
+    );
 
-    const rows = (data as any[]) ?? [];
     if (rows.length > 0) {
       return rows.map((r) => ({
         id: String(r.id),
@@ -477,47 +476,48 @@ async function buildLinearUserPicker(env: Env): Promise<PickerItem[]> {
   return [];
 }
 
-async function buildAttioMemberPicker(env: Env): Promise<PickerItem[]> {
-  // We don't have Attio tools directly here; Iteration 2 will implement server-side fetch via Composio or Attio toolkit.
-  // For now: empty picker; UI will still function.
+async function buildAttioMemberPicker(): Promise<PickerItem[]> {
   return [];
 }
 
-async function startPicker(env: Env, chatId: number, tgUserId: number, kind: PickerState["kind"]) {
+async function startPicker(
+  chatId: number,
+  tgUserId: number,
+  kind: PickerState["kind"],
+) {
   const items =
     kind === "linear_user"
-      ? await buildLinearUserPicker(env)
-      : await buildAttioMemberPicker(env);
+      ? await buildLinearUserPicker()
+      : await buildAttioMemberPicker();
 
   if (items.length === 0) {
     await tgSendMessage(
-      env,
       chatId,
-      "Picker is empty right now. Cache refresh will be implemented in Iteration 2 next commit.",
-      menuKeyboard()
+      "Picker is empty right now. Cache refresh will be implemented in next iteration.",
+      menuKeyboard(),
     );
     return;
   }
 
   const state: PickerState = { kind, page: 1, items };
-  await savePickerState(env, tgUserId, state);
+  await savePickerState(tgUserId, state);
 
   const onPickPrefix = kind === "linear_user" ? "PL" : "PA";
-  const title = kind === "linear_user" ? "Pick Linear user" : "Pick Attio workspace member";
+  const title =
+    kind === "linear_user" ? "Pick Linear user" : "Pick Attio workspace member";
   const view = renderPicker(title, state, onPickPrefix);
-  await tgSendMessage(env, chatId, view.text, view.keyboard);
+  await tgSendMessage(chatId, view.text, view.keyboard);
 }
 
 async function handlePickerAction(
-  env: Env,
   chatId: number,
   tgUserId: number,
   onPickPrefix: "PL" | "PA",
-  action: string
+  action: string,
 ) {
-  const state = await loadPickerState(env, tgUserId);
+  const state = await loadPickerState(tgUserId);
   if (!state) {
-    await tgSendMessage(env, chatId, "Picker expired. Open Profile again.", menuKeyboard());
+    await tgSendMessage(chatId, "Picker expired. Open Profile again.", menuKeyboard());
     return;
   }
 
@@ -532,51 +532,62 @@ async function handlePickerAction(
       const idx = (state.page - 1) * pageSize + (n - 1);
       const item = state.items[idx];
       if (!item) {
-        await tgSendMessage(env, chatId, "Invalid pick.", menuKeyboard());
+        await tgSendMessage(chatId, "Invalid pick.", menuKeyboard());
         return;
       }
 
       if (onPickPrefix === "PL") {
-        await upsertSetting(env, profileKeys(tgUserId).linearUserId, item.id);
-        await bestEffortAudit(env, null, "profile.set_linear", { tgUserId, linear_user_id: item.id });
+        await upsertSetting(profileKeys(tgUserId).linearUserId, item.id);
+        await bestEffortAudit(null, "profile.set_linear", {
+          tgUserId,
+          linear_user_id: item.id,
+        });
       } else {
-        await upsertSetting(env, profileKeys(tgUserId).attioWorkspaceMemberId, item.id);
-        await bestEffortAudit(env, null, "profile.set_attio", { tgUserId, attio_workspace_member_id: item.id });
+        await upsertSetting(profileKeys(tgUserId).attioWorkspaceMemberId, item.id);
+        await bestEffortAudit(null, "profile.set_attio", {
+          tgUserId,
+          attio_workspace_member_id: item.id,
+        });
       }
 
-      await showProfile(env, chatId, tgUserId);
+      await showProfile(chatId, tgUserId);
       return;
     }
   }
 
-  await savePickerState(env, tgUserId, state);
-  const title = onPickPrefix === "PL" ? "Pick Linear user" : "Pick Attio workspace member";
+  await savePickerState(tgUserId, state);
+  const title =
+    onPickPrefix === "PL" ? "Pick Linear user" : "Pick Attio workspace member";
   const view = renderPicker(title, state, onPickPrefix);
-  await tgSendMessage(env, chatId, view.text, view.keyboard);
+  await tgSendMessage(chatId, view.text, view.keyboard);
 }
 
-async function handleCallback(env: Env, update: TelegramUpdate) {
+// ─── Handlers ───────────────────────────────────────────────────
+
+export async function handleCallback(update: TelegramUpdate) {
   const cq = update.callback_query;
   if (!cq) return;
 
-  await tgAnswerCallbackQuery(env, cq.id);
+  await tgAnswerCallbackQuery(cq.id);
 
   const fromId = cq.from.id;
   const chatId = cq.message?.chat.id;
   if (!chatId) return;
 
-  if (!isAllowed(env, fromId)) {
-    await showNoAccess(env, chatId);
+  if (!isAllowed(fromId)) {
+    await showNoAccess(chatId);
     return;
   }
 
   const cbKey = `tg:callback:${cq.id}`;
-  const firstTime = await insertIdempotencyKey(env, cbKey, null);
+  const firstTime = await insertIdempotencyKey(cbKey, null);
   if (!firstTime) return;
 
   const parts = safeParseCallbackData(cq.data);
   if (!parts) {
-    await tgSendMessage(env, chatId, "Unsupported button.", { inline_keyboard: [sysNavRow()] });
+    await tgSendMessage(chatId, "Unsupported button.", {
+      inline_keyboard: [sysNavRow()],
+    });
     return;
   }
 
@@ -585,11 +596,11 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
   if (op === "SYS") {
     const action = parts[2];
     if (action === "MENU") {
-      await showMenu(env, chatId);
+      await showMenu(chatId);
       return;
     }
     if (action === "CANCEL") {
-      await tgSendMessage(env, chatId, "Cancelled.", menuKeyboard());
+      await tgSendMessage(chatId, "Cancelled.", menuKeyboard());
       return;
     }
   }
@@ -598,27 +609,28 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
     const key = parts[2] ?? "home";
     if (key === "help") {
       await tgSendMessage(
-        env,
         chatId,
-        ["Help", "", "This bot is in Iteration 2 (profile & pickers).", "Use Menu buttons."].join("\n"),
-        menuKeyboard()
+        ["Help", "", "This bot is in active development.", "Use Menu buttons."].join(
+          "\n",
+        ),
+        menuKeyboard(),
       );
       return;
     }
 
     if (key === "profile") {
-      await showProfile(env, chatId, fromId);
+      await showProfile(chatId, fromId);
       return;
     }
 
     if (key === "tasks" || key === "clients" || key === "design") {
-      const draftId = await createStubDraft(env, null, chatId, `menu:${key}`);
-      await bestEffortAudit(env, draftId, "menu.open", { key });
-      await showDraftPreview(env, chatId, draftId);
+      const draftId = await createStubDraft(null, chatId, `menu:${key}`);
+      await bestEffortAudit(draftId, "menu.open", { key });
+      await showDraftPreview(chatId, draftId);
       return;
     }
 
-    await showMenu(env, chatId);
+    await showMenu(chatId);
     return;
   }
 
@@ -627,33 +639,33 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
     const action = parts[3];
 
     if (target === "linear" && action === "pick") {
-      await startPicker(env, chatId, fromId, "linear_user");
+      await startPicker(chatId, fromId, "linear_user");
       return;
     }
     if (target === "attio" && action === "pick") {
-      await startPicker(env, chatId, fromId, "attio_member");
+      await startPicker(chatId, fromId, "attio_member");
       return;
     }
     if (target === "linear" && action === "clear") {
-      await upsertSetting(env, profileKeys(fromId).linearUserId, null);
-      await showProfile(env, chatId, fromId);
+      await upsertSetting(profileKeys(fromId).linearUserId, null);
+      await showProfile(chatId, fromId);
       return;
     }
     if (target === "attio" && action === "clear") {
-      await upsertSetting(env, profileKeys(fromId).attioWorkspaceMemberId, null);
-      await showProfile(env, chatId, fromId);
+      await upsertSetting(profileKeys(fromId).attioWorkspaceMemberId, null);
+      await showProfile(chatId, fromId);
       return;
     }
   }
 
   if (op === "PL") {
     const action = parts[2] ?? "";
-    await handlePickerAction(env, chatId, fromId, "PL", action);
+    await handlePickerAction(chatId, fromId, "PL", action);
     return;
   }
   if (op === "PA") {
     const action = parts[2] ?? "";
-    await handlePickerAction(env, chatId, fromId, "PA", action);
+    await handlePickerAction(chatId, fromId, "PA", action);
     return;
   }
 
@@ -661,29 +673,35 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
     const action = parts[2];
     const draftId = parts[3];
     if (!draftId) {
-      await tgSendMessage(env, chatId, "Invalid draft.", menuKeyboard());
+      await tgSendMessage(chatId, "Invalid draft.", menuKeyboard());
       return;
     }
 
     if (action === "C") {
-      await cancelDraft(env, draftId);
-      await bestEffortAudit(env, draftId, "draft.cancel", {});
-      await tgSendMessage(env, chatId, "Draft cancelled.", menuKeyboard());
+      await cancelDraft(draftId);
+      await bestEffortAudit(draftId, "draft.cancel", {});
+      await tgSendMessage(chatId, "Draft cancelled.", menuKeyboard());
       return;
     }
 
     if (action === "A") {
-      const res = await applyDraftStub(env, draftId);
-      await bestEffortAudit(env, draftId, "draft.apply", { alreadyApplied: res.alreadyApplied });
-      await tgSendMessage(env, chatId, res.alreadyApplied ? "Already applied." : "Applied (stub).", menuKeyboard());
+      const res = await applyDraftStub(draftId);
+      await bestEffortAudit(draftId, "draft.apply", {
+        alreadyApplied: res.alreadyApplied,
+      });
+      await tgSendMessage(
+        chatId,
+        res.alreadyApplied ? "Already applied." : "Applied (stub).",
+        menuKeyboard(),
+      );
       return;
     }
   }
 
-  await tgSendMessage(env, chatId, "Unsupported action.", menuKeyboard());
+  await tgSendMessage(chatId, "Unsupported action.", menuKeyboard());
 }
 
-async function handleMessage(env: Env, update: TelegramUpdate) {
+export async function handleMessage(update: TelegramUpdate) {
   const msg = update.message;
   if (!msg?.text) return;
   const from = msg.from;
@@ -691,67 +709,11 @@ async function handleMessage(env: Env, update: TelegramUpdate) {
 
   if (!from) return;
 
-  if (!isAllowed(env, from.id)) {
-    await showNoAccess(env, chatId);
+  if (!isAllowed(from.id)) {
+    await showNoAccess(chatId);
     return;
   }
 
-  await ensureTelegramUser(env, from);
-  await showMenu(env, chatId);
+  await ensureTelegramUser(from);
+  await showMenu(chatId);
 }
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/health") return text("ok");
-
-    if (url.pathname !== "/telegram/webhook") return text("not found", 404);
-    if (request.method !== "POST") return text("method not allowed", 405);
-
-    let update: TelegramUpdate;
-    try {
-      update = (await request.json()) as TelegramUpdate;
-    } catch {
-      return json({ ok: false, error: "invalid json" }, 400);
-    }
-
-    try {
-      if (update.callback_query) {
-        await handleCallback(env, update);
-      } else if (update.message?.text) {
-        await handleMessage(env, update);
-      }
-
-      return json({ ok: true });
-    } catch (e) {
-      const err = normalizeError(e);
-
-      const chatId = update.message?.chat.id ?? update.callback_query?.message?.chat.id ?? null;
-      const fromId = update.message?.from?.id ?? update.callback_query?.from?.id ?? null;
-      const allowed = fromId ? isAllowed(env, fromId) : false;
-
-      if (chatId && allowed) {
-        try {
-          await tgSendMessage(
-            env,
-            chatId,
-            [
-              "Error",
-              "",
-              `Summary: ${err.code}`,
-              `What happened: ${err.message}`,
-              `Retry safe?: ${err.retryable ? "Yes" : "No"}`,
-              "Next step: open Menu and try again.",
-            ].join("\n"),
-            menuKeyboard()
-          );
-        } catch {
-          // ignore
-        }
-      }
-
-      return json({ ok: true, error: err.code });
-    }
-  },
-};
