@@ -119,6 +119,9 @@ Audit/attempt logs — best-effort (см. `docs/reliability-standard.md`).
 - Error handling по контракту (Telegram message всегда; HTTP 200 по умолчанию).
 - Observability best-effort.
 
+**Implementation plan**
+- See [`docs/iteration-1-plan.md`](./iteration-1-plan.md).
+
 **Acceptance**
 - Двойной клик Apply не создает дублей.
 - Supabase down → Apply блокируется `DEPENDENCY_DOWN` (actionable) и draft сохраняется.
