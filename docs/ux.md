@@ -2,6 +2,8 @@
 
 This document defines the user experience and interaction patterns for the bot.
 
+> **Iteration plan:** see [`docs/iters.md`](./iters.md).
+
 ## Goals
 
 - One primary interaction model for *everything*: **Draft → Apply / Cancel**.
@@ -26,20 +28,20 @@ Use these message types:
    - Buttons: `◀ Prev` `Next ▶` `Pick #` `Cancel`
 
 3. **Draft** (proposed side-effects)
-   - Header: `📝 Draft #<short_id>`
+   - Header: `Draft #<short_id>`
    - Summary: what will change
    - Steps: numbered actions with resolved targets
-   - Risk flags: e.g. `⚠️ creates 12 issues` / `⚠️ bulk update`
-   - Buttons: `✅ Apply` `✏️ Edit` `❌ Cancel` `🔎 Details`
+   - Risk flags: e.g. `⚠ creates 12 issues` / `⚠ bulk update`
+   - Buttons: `Apply` `Edit` `Cancel` `Details`
 
 4. **Result** (applied)
-   - Header: `✅ Applied`
+   - Header: `Applied`
    - What changed + links
-   - Buttons: `↩ Undo (if supported)` `📌 Pin` `🔁 Repeat`
+   - Buttons: `Open` `Pin` `Repeat`
 
 ### Button style rules (CryptoBot-like)
 
-- Prefer *compact* verbs: `Apply`, `Cancel`, `Edit`, `Pick`, `Next`.
+- Prefer compact verbs: `Apply`, `Cancel`, `Edit`, `Pick`, `Next`.
 - Keep the same button order everywhere:
   1) positive action, 2) neutral, 3) negative.
 - Use inline keyboard for everything; minimize reply keyboard.
@@ -47,15 +49,10 @@ Use these message types:
 
 ### Callback payload schema
 
-All callback payloads must be parseable, versioned and short.
+All callback payloads must be parseable, versioned, and short.
 
-Format: `v1|<kind>|<draft_id>|<action>|<args>`
-
-Kinds:
-- `draft`: apply/cancel/details/edit
-- `pick`: select entity from a list
-- `nav`: pagination
-- `admin`: admin actions
+- Keep `callback_data` within Telegram limits (≈ 64 bytes).
+- Use compact opcodes.
 
 ### Draft lifecycle
 
@@ -90,14 +87,10 @@ If `needs_clarification` is not empty:
 
 Queries should still use Draft, but can be **auto-apply** when strictly read-only.
 
-- Examples:
-  - “Отчет по клиентам за неделю” → Attio query → report card/list.
-  - “Статус проектов по сделке X” → Linear query → list grouped by state.
-
 Buttons for reports:
-- `📄 Export` (CSV)
-- `🔁 Refresh`
-- `📌 Pin`
+- `Refresh`
+- `Export CSV`
+- `Pin`
 
 ## UX acceptance checklist
 

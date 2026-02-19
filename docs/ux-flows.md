@@ -2,44 +2,108 @@
 
 This doc describes concrete flows with messages and buttons.
 
+> **Iteration plan:** see [`docs/iters.md`](./iters.md).
+
 ## Global rules
 
 - Every list is paginated (<= 8 items/page).
 - Button order: positive → neutral → negative.
 - Every callback is idempotent.
 
-## Flow 1 — Free-form mutation → Draft → Apply
+## Flow 0 — Main menu (UI-first)
 
-Input: “Переведи сделку ACME в Won и создай kickoff”
+**Entry**: any allowed user opens the bot or sends any message.
 
-1) Bot: shows `Draft` with resolved entities (deal + company), risks, and steps.
-Buttons: `✅ Apply` `✏️ Edit` `🔎 Details` `❌ Cancel`
+**Bot**: shows Main Menu card.
 
-2) Apply:
-- show “Applying…” (optional edit of same message)
-- then `Result` with links
+Buttons:
+- `Tasks`
+- `Clients`
+- `Design Studio`
+- `Profile`
+- `Help`
+
+(Optionally: `Admin` visible only to allowlist + admin role)
+
+---
+
+## Flow 1 — Task creation wizard (Draft → Apply)
+
+**Entry**: Main Menu → `Tasks` → `Create`
+
+**Step 1 (Source)**
+- Bot: “Choose task source”
+- Buttons: `Forwarded message` / `Typed text` / `Cancel`
+
+**Step 2 (Capture)**
+- If forwarded: bot asks user to forward the message.
+- If typed: bot asks user to send the text.
+- Buttons: `Cancel`
+
+**Step 3 (Project picker)**
+- Bot shows a paginated list of existing projects.
+- Buttons: `Prev` `Next` `Pick #` `+ Create new` `Cancel`
+
+**Create new project flow**
+- Bot asks for project name.
+- On confirm: creates project draft (or creates immediately but still Draft-gated; preferred: Draft).
+- After success: returns to Step 3 and auto-selects the created project.
+
+**Step 4 (Assignee)**
+- Default: from Profile mapping.
+- Buttons: `Keep default` / `Change…` / `Cancel`
+
+**Step 5 (Draft preview)**
+- Bot shows Draft summary and steps.
+- Buttons: `Apply` / `Edit` / `Details` / `Cancel`
+
+**Apply**
+- Bot shows “Applying…” then Result.
+
+---
 
 ## Flow 2 — Ambiguous entity → Pick list
 
-Input: “покажи сделку atlas”
+**Entry**: any flow that needs entity resolution.
 
-1) Bot returns `List` of candidates.
-Buttons: `◀ Prev` `Next ▶` `Pick 1..8` `Cancel`
+1) Bot returns a `List` of candidates.
+2) User picks one.
+3) Bot shows a `Card` confirmation and continues the original wizard.
 
-2) On pick: show `Card` then continue (either show result or build Draft).
+---
 
-## Flow 3 — Voice message
+## Flow 3 — Profile mapping
 
-1) Bot transcribes and shows:
-- Transcript (short)
-Buttons: `✅ Use transcript` `✏️ Edit text` `❌ Cancel`
+**Entry**: Main Menu → `Profile`
 
-2) After confirm: run same as Flow 1/2.
+- Bot shows mapping status:
+  - Linear: set/not set
+  - Attio: set/not set
 
-## Flow 4 — Report
+Buttons:
+- `Set Linear user`
+- `Set Attio actor`
+- `Back`
 
-Input: “Отчет по пайплайну”
+Each mapping uses a picker/search flow and writes to DB settings.
 
-1) Bot returns `Report card` + top numbers.
-Buttons: `🔁 Refresh` `📄 Export CSV` `❌ Close`
+---
 
+## Flow 4 — Clients bulk import
+
+**Entry**: Main Menu → `Clients` → `Import (bulk)`
+
+1) Bot asks to paste bulk text.
+2) Bot validates and shows Draft preview with counts.
+3) Buttons: `Apply` / `Fix invalid` / `Cancel`
+
+---
+
+## Flow 5 — Design Studio
+
+**Entry**: Main Menu → `Design Studio`
+
+Buttons:
+- `Deal stage`
+- `Deal won`
+- `Back`
