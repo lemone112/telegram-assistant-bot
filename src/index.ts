@@ -1,5 +1,5 @@
 import type { NormalizedError } from "./safety/types";
-import { db } from "./supabase";
+import { db, getSetting, upsertSetting } from "./supabase";
 
 type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -51,6 +51,11 @@ type InlineKeyboardButton = { text: string; callback_data: string };
 
 type InlineKeyboardMarkup = {
   inline_keyboard: Array<Array<InlineKeyboardButton>>;
+};
+
+type Profile = {
+  linear_user_id: string | null;
+  attio_workspace_member_id: string | null;
 };
 
 function json(body: unknown, status = 200): Response {
@@ -131,7 +136,6 @@ async function tgSendMessage(
 }
 
 async function tgAnswerCallbackQuery(env: Env, callbackQueryId: string) {
-  // Always best-effort: do not fail the webhook if Telegram rejects.
   try {
     await tgCall(env, "answerCallbackQuery", {
       callback_query_id: callbackQueryId,
@@ -251,7 +255,7 @@ async function ensureTelegramUser(env: Env, tgUser: TelegramUser | undefined) {
 }
 
 async function showMenu(env: Env, chatId: number) {
-  const body = ["Assistant", "", "Choose an action:"] .join("\n");
+  const body = ["Assistant", "", "Choose an action:"].join("\n");
   await tgSendMessage(env, chatId, body, menuKeyboard());
 }
 
@@ -353,6 +357,204 @@ async function applyDraftStub(env: Env, draftId: string) {
   return { alreadyApplied: false };
 }
 
+function profileKeys(tgUserId: number) {
+  return {
+    linearUserId: `profile:${tgUserId}:linear_user_id`,
+    attioWorkspaceMemberId: `profile:${tgUserId}:attio_workspace_member_id`,
+  };
+}
+
+async function loadProfile(env: Env, tgUserId: number): Promise<Profile> {
+  const keys = profileKeys(tgUserId);
+  const linear_user_id = (await getSetting<string>(env, keys.linearUserId).catch(() => null)) ?? null;
+  const attio_workspace_member_id =
+    (await getSetting<string>(env, keys.attioWorkspaceMemberId).catch(() => null)) ?? null;
+  return { linear_user_id, attio_workspace_member_id };
+}
+
+function profileKeyboard(): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Set Linear user", callback_data: "v1:P:linear:pick" },
+        { text: "Set Attio member", callback_data: "v1:P:attio:pick" },
+      ],
+      [
+        { text: "Clear Linear", callback_data: "v1:P:linear:clear" },
+        { text: "Clear Attio", callback_data: "v1:P:attio:clear" },
+      ],
+      sysNavRow(),
+    ],
+  };
+}
+
+type PickerItem = { id: string; label: string; subtitle?: string };
+
+type PickerState = {
+  kind: "linear_user" | "attio_member";
+  page: number;
+  items: PickerItem[];
+};
+
+function pickerStateKey(tgUserId: number): string {
+  return `picker:${tgUserId}:state`;
+}
+
+async function savePickerState(env: Env, tgUserId: number, state: PickerState) {
+  await upsertSetting(env, pickerStateKey(tgUserId), state);
+}
+
+async function loadPickerState(env: Env, tgUserId: number): Promise<PickerState | null> {
+  return (await getSetting<PickerState>(env, pickerStateKey(tgUserId))) ?? null;
+}
+
+function renderPicker(
+  title: string,
+  state: PickerState,
+  onPickPrefix: string
+): { text: string; keyboard: InlineKeyboardMarkup } {
+  const pageSize = 8;
+  const start = (state.page - 1) * pageSize;
+  const pageItems = state.items.slice(start, start + pageSize);
+
+  const lines: string[] = [title, "", `Page ${state.page}`];
+  pageItems.forEach((it, i) => {
+    const idx = i + 1;
+    lines.push(`${idx}) ${it.label}${it.subtitle ? ` — ${it.subtitle}` : ""}`);
+  });
+
+  const pickRow: InlineKeyboardButton[] = pageItems.map((_, i) => ({
+    text: `Pick ${i + 1}`,
+    callback_data: `v1:${onPickPrefix}:${i + 1}`,
+  }));
+
+  const navRow: InlineKeyboardButton[] = [
+    { text: "◀ Prev", callback_data: `v1:${onPickPrefix}:prev` },
+    { text: "Next ▶", callback_data: `v1:${onPickPrefix}:next` },
+  ];
+
+  return {
+    text: lines.join("\n"),
+    keyboard: {
+      inline_keyboard: [pickRow, navRow, sysNavRow()],
+    },
+  };
+}
+
+async function showProfile(env: Env, chatId: number, tgUserId: number) {
+  const p = await loadProfile(env, tgUserId);
+  const body = [
+    "Profile",
+    "",
+    `Linear user: ${p.linear_user_id ?? "(not set)"}`,
+    `Attio member: ${p.attio_workspace_member_id ?? "(not set)"}`,
+  ].join("\n");
+  await tgSendMessage(env, chatId, body, profileKeyboard());
+}
+
+async function buildLinearUserPicker(env: Env): Promise<PickerItem[]> {
+  // Use Linear cache table if present; otherwise fall back to empty.
+  // Iteration 2 will add proper cache refresh; for now we read existing cache or allow direct listing later.
+  try {
+    const { data } = await db(env)
+      .from("linear_users_cache")
+      .select("id,name,display_name,email,active")
+      .eq("active", true)
+      .order("name", { ascending: true })
+      .limit(250);
+
+    const rows = (data as any[]) ?? [];
+    if (rows.length > 0) {
+      return rows.map((r) => ({
+        id: String(r.id),
+        label: String(r.name ?? r.display_name ?? r.id),
+        subtitle: r.email ? String(r.email) : undefined,
+      }));
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+async function buildAttioMemberPicker(env: Env): Promise<PickerItem[]> {
+  // We don't have Attio tools directly here; Iteration 2 will implement server-side fetch via Composio or Attio toolkit.
+  // For now: empty picker; UI will still function.
+  return [];
+}
+
+async function startPicker(env: Env, chatId: number, tgUserId: number, kind: PickerState["kind"]) {
+  const items =
+    kind === "linear_user"
+      ? await buildLinearUserPicker(env)
+      : await buildAttioMemberPicker(env);
+
+  if (items.length === 0) {
+    await tgSendMessage(
+      env,
+      chatId,
+      "Picker is empty right now. Cache refresh will be implemented in Iteration 2 next commit.",
+      menuKeyboard()
+    );
+    return;
+  }
+
+  const state: PickerState = { kind, page: 1, items };
+  await savePickerState(env, tgUserId, state);
+
+  const onPickPrefix = kind === "linear_user" ? "PL" : "PA";
+  const title = kind === "linear_user" ? "Pick Linear user" : "Pick Attio workspace member";
+  const view = renderPicker(title, state, onPickPrefix);
+  await tgSendMessage(env, chatId, view.text, view.keyboard);
+}
+
+async function handlePickerAction(
+  env: Env,
+  chatId: number,
+  tgUserId: number,
+  onPickPrefix: "PL" | "PA",
+  action: string
+) {
+  const state = await loadPickerState(env, tgUserId);
+  if (!state) {
+    await tgSendMessage(env, chatId, "Picker expired. Open Profile again.", menuKeyboard());
+    return;
+  }
+
+  const pageSize = 8;
+  const maxPage = Math.max(1, Math.ceil(state.items.length / pageSize));
+
+  if (action === "prev") state.page = Math.max(1, state.page - 1);
+  else if (action === "next") state.page = Math.min(maxPage, state.page + 1);
+  else {
+    const n = Number(action);
+    if (Number.isFinite(n) && n >= 1 && n <= 8) {
+      const idx = (state.page - 1) * pageSize + (n - 1);
+      const item = state.items[idx];
+      if (!item) {
+        await tgSendMessage(env, chatId, "Invalid pick.", menuKeyboard());
+        return;
+      }
+
+      if (onPickPrefix === "PL") {
+        await upsertSetting(env, profileKeys(tgUserId).linearUserId, item.id);
+        await bestEffortAudit(env, null, "profile.set_linear", { tgUserId, linear_user_id: item.id });
+      } else {
+        await upsertSetting(env, profileKeys(tgUserId).attioWorkspaceMemberId, item.id);
+        await bestEffortAudit(env, null, "profile.set_attio", { tgUserId, attio_workspace_member_id: item.id });
+      }
+
+      await showProfile(env, chatId, tgUserId);
+      return;
+    }
+  }
+
+  await savePickerState(env, tgUserId, state);
+  const title = onPickPrefix === "PL" ? "Pick Linear user" : "Pick Attio workspace member";
+  const view = renderPicker(title, state, onPickPrefix);
+  await tgSendMessage(env, chatId, view.text, view.keyboard);
+}
+
 async function handleCallback(env: Env, update: TelegramUpdate) {
   const cq = update.callback_query;
   if (!cq) return;
@@ -398,13 +600,18 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
       await tgSendMessage(
         env,
         chatId,
-        ["Help", "", "This bot is in Iteration 1 (platform build).", "Use Menu buttons."].join("\n"),
+        ["Help", "", "This bot is in Iteration 2 (profile & pickers).", "Use Menu buttons."].join("\n"),
         menuKeyboard()
       );
       return;
     }
 
-    if (key === "tasks" || key === "clients" || key === "design" || key === "profile") {
+    if (key === "profile") {
+      await showProfile(env, chatId, fromId);
+      return;
+    }
+
+    if (key === "tasks" || key === "clients" || key === "design") {
       const draftId = await createStubDraft(env, null, chatId, `menu:${key}`);
       await bestEffortAudit(env, draftId, "menu.open", { key });
       await showDraftPreview(env, chatId, draftId);
@@ -412,6 +619,41 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
     }
 
     await showMenu(env, chatId);
+    return;
+  }
+
+  if (op === "P") {
+    const target = parts[2];
+    const action = parts[3];
+
+    if (target === "linear" && action === "pick") {
+      await startPicker(env, chatId, fromId, "linear_user");
+      return;
+    }
+    if (target === "attio" && action === "pick") {
+      await startPicker(env, chatId, fromId, "attio_member");
+      return;
+    }
+    if (target === "linear" && action === "clear") {
+      await upsertSetting(env, profileKeys(fromId).linearUserId, null);
+      await showProfile(env, chatId, fromId);
+      return;
+    }
+    if (target === "attio" && action === "clear") {
+      await upsertSetting(env, profileKeys(fromId).attioWorkspaceMemberId, null);
+      await showProfile(env, chatId, fromId);
+      return;
+    }
+  }
+
+  if (op === "PL") {
+    const action = parts[2] ?? "";
+    await handlePickerAction(env, chatId, fromId, "PL", action);
+    return;
+  }
+  if (op === "PA") {
+    const action = parts[2] ?? "";
+    await handlePickerAction(env, chatId, fromId, "PA", action);
     return;
   }
 
@@ -433,12 +675,7 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
     if (action === "A") {
       const res = await applyDraftStub(env, draftId);
       await bestEffortAudit(env, draftId, "draft.apply", { alreadyApplied: res.alreadyApplied });
-      await tgSendMessage(
-        env,
-        chatId,
-        res.alreadyApplied ? "Already applied." : "Applied (stub).",
-        menuKeyboard()
-      );
+      await tgSendMessage(env, chatId, res.alreadyApplied ? "Already applied." : "Applied (stub).", menuKeyboard());
       return;
     }
   }
