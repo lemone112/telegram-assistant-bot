@@ -8,9 +8,8 @@ This document records **project-level decisions** that are not explicitly specif
 
 ### Decision
 
-- The bot supports **two configuration layers** for the default Linear team:
-  1. **Runtime config in DB (primary)** — editable via admin commands.
-  2. **Environment variable fallback (secondary)** — `LINEAR_TEAM_ID`.
+- **Today (current runtime):** the bot resolves the default Linear team id from **environment** only: `LINEAR_TEAM_ID`.
+- **Planned (Iteration 7 / follow-up code change):** add a DB-backed runtime config layer (`bot.config` key `linear.default_team_id`) editable via admin commands, with env as fallback.
 
 ### Rationale
 
@@ -18,16 +17,16 @@ This document records **project-level decisions** that are not explicitly specif
 - Admin workflows (Iteration 7) require safe remediation without touching infrastructure.
 - DB config allows per-tenant evolution later without breaking current single-tenant behavior.
 
-### Policy
+### Target policy (once implemented)
 
 - On every Linear operation, resolve team id as:
   1. `bot.config` value `linear.default_team_id` (if set)
   2. `process.env.LINEAR_TEAM_ID`
   3. else: raise `CONFIG_MISSING` with next steps.
 
-### Admin UX
+### Admin UX (target)
 
-- `/admin linear teams` shows teams and allows setting `linear.default_team_id`.
+- `/admin linear teams` allows setting `linear.default_team_id`.
 - Any **write** action requires explicit confirmation.
 
 ---
@@ -45,7 +44,7 @@ This document records **project-level decisions** that are not explicitly specif
 
 ### Optional debug mode
 
-- Admins may enable a debug flag `ui.show_restricted_placeholders=true` (DB config) to render placeholders for troubleshooting.
+- Admins may enable a debug flag `ui.show_restricted_placeholders=true` (planned DB config) to render placeholders for troubleshooting.
 - The placeholder must not include counts, timestamps, participants, or titles.
 
 ---
