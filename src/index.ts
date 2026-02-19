@@ -1,5 +1,6 @@
 import type { NormalizedError } from "./safety/types";
 import { db, getSetting, upsertSetting } from "./supabase";
+import { composioExecute } from "./composio";
 
 type Env = {
   TELEGRAM_BOT_TOKEN: string;
@@ -56,6 +57,14 @@ type InlineKeyboardMarkup = {
 type Profile = {
   linear_user_id: string | null;
   attio_workspace_member_id: string | null;
+};
+
+type PickerItem = { id: string; label: string; subtitle?: string };
+
+type PickerState = {
+  kind: "linear_user" | "attio_member";
+  page: number;
+  items: PickerItem[];
 };
 
 function json(body: unknown, status = 200): Response {
@@ -259,104 +268,6 @@ async function showMenu(env: Env, chatId: number) {
   await tgSendMessage(env, chatId, body, menuKeyboard());
 }
 
-async function createStubDraft(env: Env, telegramUserPk: string | null, chatId: number, sourceText: string) {
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-  const draftRow: any = {
-    telegram_user_id: telegramUserPk,
-    chat_id: chatId,
-    source_type: "text",
-    source_text: sourceText,
-    transcript: null,
-    intent_summary: "Stub draft (Iteration 1)",
-    status: "DRAFT",
-    assumptions: [],
-    risks: [
-      {
-        kind: "missing_required",
-        details: "Iteration 1: business actions are stubbed; this draft is only to validate the platform.",
-      },
-    ],
-    questions: [],
-    actions: [
-      {
-        toolkit: "supabase",
-        tool_slug: "NOOP",
-        args: {},
-        read_only: false,
-        idempotency_scope: "draft:apply:stub",
-        preview: "No-op (platform validation)",
-      },
-    ],
-    created_at: nowIso(),
-    expires_at: expiresAt,
-  };
-
-  const { data, error } = await db(env).from("drafts").insert(draftRow as any).select("id").maybeSingle();
-  if (error) throw new Error(`Failed to create draft: ${error.message}`);
-  return (data as any).id as string;
-}
-
-function draftKeyboard(draftId: string): InlineKeyboardMarkup {
-  return {
-    inline_keyboard: [
-      [
-        { text: "Apply", callback_data: `v1:D:A:${draftId}` },
-        { text: "Cancel", callback_data: `v1:D:C:${draftId}` },
-      ],
-      sysNavRow(),
-    ],
-  };
-}
-
-async function showDraftPreview(env: Env, chatId: number, draftId: string) {
-  const body = [
-    `Draft #${draftId.slice(0, 8)}`,
-    "",
-    "Summary:",
-    "- Stub draft (Iteration 1)",
-    "",
-    "Steps:",
-    "1) No-op (platform validation)",
-    "",
-    "Risks:",
-    "- Platform-only: no business actions yet",
-  ].join("\n");
-  await tgSendMessage(env, chatId, body, draftKeyboard(draftId));
-}
-
-async function cancelDraft(env: Env, draftId: string) {
-  await db(env)
-    .from("drafts")
-    .update({ status: "CANCELLED", updated_at: nowIso() } as any)
-    .eq("id", draftId);
-}
-
-async function applyDraftStub(env: Env, draftId: string) {
-  const applyKey = `draft:${draftId}:apply`;
-  const ok = await insertIdempotencyKey(env, applyKey, draftId);
-  if (!ok) return { alreadyApplied: true };
-
-  try {
-    await db(env).from("draft_apply_attempts").insert({
-      draft_id: draftId,
-      idempotency_key: applyKey,
-      started_at: nowIso(),
-      finished_at: nowIso(),
-      result: { ok: true, note: "Iteration 1 stub apply" },
-      error_summary: null,
-    } as any);
-  } catch {
-    // ignore
-  }
-
-  await db(env)
-    .from("drafts")
-    .update({ status: "APPLIED", updated_at: nowIso() } as any)
-    .eq("id", draftId);
-
-  return { alreadyApplied: false };
-}
-
 function profileKeys(tgUserId: number) {
   return {
     linearUserId: `profile:${tgUserId}:linear_user_id`,
@@ -388,14 +299,6 @@ function profileKeyboard(): InlineKeyboardMarkup {
   };
 }
 
-type PickerItem = { id: string; label: string; subtitle?: string };
-
-type PickerState = {
-  kind: "linear_user" | "attio_member";
-  page: number;
-  items: PickerItem[];
-};
-
 function pickerStateKey(tgUserId: number): string {
   return `picker:${tgUserId}:state`;
 }
@@ -423,10 +326,14 @@ function renderPicker(
     lines.push(`${idx}) ${it.label}${it.subtitle ? ` — ${it.subtitle}` : ""}`);
   });
 
-  const pickRow: InlineKeyboardButton[] = pageItems.map((_, i) => ({
-    text: `Pick ${i + 1}`,
+  const pickRows: InlineKeyboardButton[][] = [];
+  // Split pick buttons into 2 rows of up to 4 buttons each
+  const btns = pageItems.map((_, i) => ({
+    text: `${i + 1}`,
     callback_data: `v1:${onPickPrefix}:${i + 1}`,
   }));
+  pickRows.push(btns.slice(0, 4));
+  if (btns.length > 4) pickRows.push(btns.slice(4, 8));
 
   const navRow: InlineKeyboardButton[] = [
     { text: "◀ Prev", callback_data: `v1:${onPickPrefix}:prev` },
@@ -436,7 +343,7 @@ function renderPicker(
   return {
     text: lines.join("\n"),
     keyboard: {
-      inline_keyboard: [pickRow, navRow, sysNavRow()],
+      inline_keyboard: [...pickRows, navRow, sysNavRow()],
     },
   };
 }
@@ -452,50 +359,53 @@ async function showProfile(env: Env, chatId: number, tgUserId: number) {
   await tgSendMessage(env, chatId, body, profileKeyboard());
 }
 
-async function buildLinearUserPicker(env: Env): Promise<PickerItem[]> {
-  // Use Linear cache table if present; otherwise fall back to empty.
-  // Iteration 2 will add proper cache refresh; for now we read existing cache or allow direct listing later.
-  try {
-    const { data } = await db(env)
-      .from("linear_users_cache")
-      .select("id,name,display_name,email,active")
-      .eq("active", true)
-      .order("name", { ascending: true })
-      .limit(250);
+async function listLinearUsersViaComposio(env: Env): Promise<PickerItem[]> {
+  // Fetch via Composio tool execution. ConnectedAccountId is omitted: backend uses the default connected account.
+  const resp = await composioExecute(env as any, {
+    tool_slug: "LINEAR_LIST_LINEAR_USERS",
+    arguments: { first: 250 },
+  });
 
-    const rows = (data as any[]) ?? [];
-    if (rows.length > 0) {
-      return rows.map((r) => ({
-        id: String(r.id),
-        label: String(r.name ?? r.display_name ?? r.id),
-        subtitle: r.email ? String(r.email) : undefined,
-      }));
-    }
-  } catch {
-    // ignore
-  }
-  return [];
+  // Defensive parsing: Composio may wrap payload.
+  const users = (resp as any)?.data?.users ?? (resp as any)?.users ?? [];
+  if (!Array.isArray(users)) return [];
+
+  return users
+    .filter((u: any) => u && u.active === true)
+    .map((u: any) => ({
+      id: String(u.id),
+      label: String(u.displayName ?? u.name ?? u.email ?? u.id),
+      subtitle: u.email ? String(u.email) : undefined,
+    }));
 }
 
-async function buildAttioMemberPicker(env: Env): Promise<PickerItem[]> {
-  // We don't have Attio tools directly here; Iteration 2 will implement server-side fetch via Composio or Attio toolkit.
-  // For now: empty picker; UI will still function.
-  return [];
+async function listAttioMembersViaComposio(env: Env): Promise<PickerItem[]> {
+  const resp = await composioExecute(env as any, {
+    tool_slug: "ATTIO_LIST_WORKSPACE_MEMBERS",
+    arguments: {},
+  });
+
+  const members = (resp as any)?.data?.data ?? (resp as any)?.data ?? [];
+  if (!Array.isArray(members)) return [];
+
+  return members.map((m: any) => {
+    const id = m?.id?.workspace_member_id ?? m?.id?.workspaceMemberId ?? m?.workspace_member_id;
+    const label = [m?.first_name, m?.last_name].filter(Boolean).join(" ") || m?.email_address || String(id);
+    return {
+      id: String(id),
+      label,
+      subtitle: m?.email_address ? String(m.email_address) : undefined,
+    };
+  });
 }
 
 async function startPicker(env: Env, chatId: number, tgUserId: number, kind: PickerState["kind"]) {
-  const items =
-    kind === "linear_user"
-      ? await buildLinearUserPicker(env)
-      : await buildAttioMemberPicker(env);
+  const items = kind === "linear_user"
+    ? await listLinearUsersViaComposio(env)
+    : await listAttioMembersViaComposio(env);
 
   if (items.length === 0) {
-    await tgSendMessage(
-      env,
-      chatId,
-      "Picker is empty right now. Cache refresh will be implemented in Iteration 2 next commit.",
-      menuKeyboard()
-    );
+    await tgSendMessage(env, chatId, "No items found.", menuKeyboard());
     return;
   }
 
@@ -611,13 +521,7 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
       return;
     }
 
-    if (key === "tasks" || key === "clients" || key === "design") {
-      const draftId = await createStubDraft(env, null, chatId, `menu:${key}`);
-      await bestEffortAudit(env, draftId, "menu.open", { key });
-      await showDraftPreview(env, chatId, draftId);
-      return;
-    }
-
+    // For now, other menu items are still stubs.
     await showMenu(env, chatId);
     return;
   }
@@ -655,29 +559,6 @@ async function handleCallback(env: Env, update: TelegramUpdate) {
     const action = parts[2] ?? "";
     await handlePickerAction(env, chatId, fromId, "PA", action);
     return;
-  }
-
-  if (op === "D") {
-    const action = parts[2];
-    const draftId = parts[3];
-    if (!draftId) {
-      await tgSendMessage(env, chatId, "Invalid draft.", menuKeyboard());
-      return;
-    }
-
-    if (action === "C") {
-      await cancelDraft(env, draftId);
-      await bestEffortAudit(env, draftId, "draft.cancel", {});
-      await tgSendMessage(env, chatId, "Draft cancelled.", menuKeyboard());
-      return;
-    }
-
-    if (action === "A") {
-      const res = await applyDraftStub(env, draftId);
-      await bestEffortAudit(env, draftId, "draft.apply", { alreadyApplied: res.alreadyApplied });
-      await tgSendMessage(env, chatId, res.alreadyApplied ? "Already applied." : "Applied (stub).", menuKeyboard());
-      return;
-    }
   }
 
   await tgSendMessage(env, chatId, "Unsupported action.", menuKeyboard());
